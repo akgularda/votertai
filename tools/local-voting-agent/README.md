@@ -7,7 +7,7 @@ The Voting agent is isolated from Juke Local and BroadcastAI. It has its own pro
 ## Playback Lifecycle
 
 1. A random enabled track starts when the queue is empty.
-2. At 60 seconds before the current track ends, the agent selects three eligible candidates and publishes a round.
+2. As soon as the current track starts, the agent selects three eligible candidates and publishes a round.
 3. The current track continues without being cut.
 4. At 10 seconds before the end, voting locks and the backend resolves the winner from registered-user ballots.
 5. The winner is queued once and plays after the current track.
@@ -57,7 +57,7 @@ The local dashboard and API listen only on `http://127.0.0.1:4317`.
 MUSIC_LIBRARY_DIR=C:\Users\tedu\Downloads\song
 MUSIC_LIBRARY_REFRESH_SECONDS=60
 CANDIDATE_COUNT=3
-VOTING_OPEN_BEFORE_END_SECONDS=60
+VOTING_OPEN_BEFORE_END_SECONDS=86400
 VOTING_LOCK_BEFORE_END_SECONDS=10
 VOTING_RECENT_TRACK_LIMIT=8
 VOTING_AGENT_PLAYBACK_MODE=live
@@ -119,9 +119,10 @@ Invoke-RestMethod http://127.0.0.1:4317/api/state
 
 ## Start or Recover a Production Voting Round
 
-The normal automation opens a three-candidate round 60 seconds before the
-current song ends. To open one immediately and verify that it reached the
-production website, run:
+The production configuration uses a 24-hour open window, so every normal track
+gets a three-candidate round as soon as it starts instead of leaving the site on
+"waiting for a new round". To open one immediately and verify that it reached
+the production website, run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\start-production-voting-round.ps1

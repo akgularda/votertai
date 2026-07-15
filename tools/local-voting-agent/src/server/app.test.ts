@@ -704,19 +704,20 @@ describe('local voting API', () => {
     expect(publishedStatuses).not.toContain('resolved');
   });
 
-  it('resolves a compatible elapsed locked round after restart instead of cancelling it', async () => {
+  it('restores and resolves an elapsed locked round on startup even when the new track schedule differs', async () => {
     const localSongs: CatalogSong[] = [
       { ...songs[0], albumArtPath: 'C:/Local Art/one.jpg' },
       { ...songs[1], albumArtPath: 'C:/Local Art/two.jpg' },
       songs[2],
+      { id: 'song-current', title: 'Current', artist: 'Artist', filePath: 'C:/Music/current.mp3', durationSeconds: 3_600 },
     ];
     let activeRound: VotingRound = {
       id: 'elapsed-locked-round',
       status: 'locked',
-      openedAt: new Date(Date.now() - 60_000).toISOString(),
-      lockAt: new Date(Date.now() - 500).toISOString(),
-      resolveAt: new Date(Date.now() - 500).toISOString(),
-      lockedAt: new Date(Date.now() - 500).toISOString(),
+      openedAt: new Date(Date.now() - 180_000).toISOString(),
+      lockAt: new Date(Date.now() - 120_000).toISOString(),
+      resolveAt: new Date(Date.now() - 120_000).toISOString(),
+      lockedAt: new Date(Date.now() - 120_000).toISOString(),
       resolvedAt: null,
       candidates: [
         {
@@ -754,9 +755,9 @@ describe('local voting API', () => {
       currentTitle: 'Current',
       currentFilePath: 'C:/Music/current.mp3',
       currentSongId: 'song-current',
-      currentDurationSeconds: 120,
+      currentDurationSeconds: 3_600,
       currentStartedAt: new Date().toISOString(),
-      currentEndsAt: new Date(Date.now() + 5_000).toISOString(),
+      currentEndsAt: new Date(Date.now() + 3_000_000).toISOString(),
       queuedEntries: 0,
       lastError: null,
       updatedAt: new Date().toISOString(),
@@ -771,7 +772,7 @@ describe('local voting API', () => {
         },
         status: () => playbackStatus,
       },
-      automationTickMs: 0,
+      automationTickMs: 5,
       rng: () => 0,
       backendClient: {
         publishRound: async (round) => {
@@ -790,8 +791,10 @@ describe('local voting API', () => {
       },
     });
 
-    const response = await request(app).post('/api/rounds/start').send({ candidateCount: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const response = await request(app).get('/api/state');
 
+    expect(response.body.round, JSON.stringify(response.body)).not.toBeNull();
     expect(response.body.round.status).toBe('resolved');
     expect(response.body.round.winnerCandidateId).toBe('candidate-song-2');
     expect(response.body.round.candidates[1].filePath).toBe('C:/Music/two.mp3');
@@ -1034,7 +1037,7 @@ describe('local voting API', () => {
         },
         connectionState: () => 'connected',
       },
-      automationTickMs: 0,
+      automationTickMs: 5,
       votingLockBeforeEndMs: 10_000,
       rng: () => 0,
     });

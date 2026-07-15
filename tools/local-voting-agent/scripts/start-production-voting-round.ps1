@@ -110,8 +110,13 @@ if ($existingRound -and $existingRound.status -eq 'open') {
   exit 0
 }
 
-$created = Invoke-RestMethod -Uri "$AgentBaseUrl/api/rounds/start" -Method Post -ContentType 'application/json' `
-  -Body (@{ candidateCount = $CandidateCount } | ConvertTo-Json -Compress) -TimeoutSec 35
+$created = $null
+for ($startAttempt = 1; $startAttempt -le 3; $startAttempt++) {
+  $created = Invoke-RestMethod -Uri "$AgentBaseUrl/api/rounds/start" -Method Post -ContentType 'application/json' `
+    -Body (@{ candidateCount = $CandidateCount } | ConvertTo-Json -Compress) -TimeoutSec 35
+  if ($created.round -and $created.round.status -eq 'open') { break }
+  Start-Sleep -Seconds 2
+}
 if ($created.backendSyncError) { throw "Backend rejected the round: $($created.backendSyncError)" }
 if (-not $created.round -or $created.round.status -ne 'open') { throw 'The local agent did not create an open voting round.' }
 

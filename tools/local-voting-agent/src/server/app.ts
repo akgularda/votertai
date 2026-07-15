@@ -220,6 +220,7 @@ export function createApp(options: CreateAppOptions): express.Express {
   let observedRemainingSeconds: number | null = null;
   let roundSourceKey: string | null = null;
   let automationBusy = false;
+  let lastBackendRecoveryAttemptAt = 0;
   const recentSongIds: string[] = [];
   const enqueuedRoundIds = new Set<string>();
 
@@ -315,8 +316,7 @@ export function createApp(options: CreateAppOptions): express.Express {
       const isFutureActiveRound = resolveAtMs > nowMs;
       const isRecoverableElapsedLockedRound =
         activeRound.status === 'locked' &&
-        resolveAtMs <= nowMs &&
-        nowMs - resolveAtMs <= Math.max(options.votingOpenBeforeEndMs ?? 60_000, 60_000);
+        resolveAtMs <= nowMs;
       const isRecoverableRecentResolvedRound =
         activeRound.status === 'resolved' &&
         Number.isFinite(resolvedAtMs) &&
@@ -341,8 +341,7 @@ export function createApp(options: CreateAppOptions): express.Express {
       const canResume =
         (activeRound.status === 'open' || activeRound.status === 'locked') &&
         Number.isFinite(resolveAtMs) &&
-        scheduleMatchesCurrentTrack &&
-        (isFutureActiveRound || isRecoverableElapsedLockedRound) &&
+        ((scheduleMatchesCurrentTrack && isFutureActiveRound) || isRecoverableElapsedLockedRound) &&
         Boolean(restoredRound);
 
       if (canResume && restoredRound) {
@@ -596,6 +595,26 @@ export function createApp(options: CreateAppOptions): express.Express {
         observedPlaybackKey = sourceKey;
         recentSongIds.unshift(song.id);
         recentSongIds.splice(options.recentTrackLimit ?? 8);
+      }
+
+      if (!currentRound && Date.now() - lastBackendRecoveryAttemptAt >= 5_000) {
+        lastBackendRecoveryAttemptAt = Date.now();
+        await resumeOrCancelBackendActiveRound(sourceKey);
+      }
+
+      const backendResolveAtMs = Date.parse(currentRound?.resolveAt ?? '');
+      if (
+        currentRound &&
+        (currentRound.status === 'open' || currentRound.status === 'locked') &&
+        Number.isFinite(backendResolveAtMs) &&
+        backendResolveAtMs <= Date.now()
+      ) {
+        if (currentRound.status === 'open') {
+          currentRound = lockRound(currentRound);
+          await publishRound();
+        }
+        await resolveActiveRound(currentRound.id);
+        return;
       }
 
       const remainingMs = endsAt - Date.now();
