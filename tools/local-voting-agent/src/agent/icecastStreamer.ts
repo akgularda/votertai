@@ -52,16 +52,25 @@ function chooseRandomEntry(fillerSongs: CatalogSong[], recentSongIds: string[]):
   return songToEntry(pool[Math.floor(Math.random() * pool.length)]);
 }
 
-function authenticatedOutputUrl(config: IcecastSourceConfig): string {
+export function buildAuthenticatedIcecastOutputUrl(config: IcecastSourceConfig): string {
   const publicUrl = new URL(config.url);
   publicUrl.username = config.username;
   publicUrl.password = config.password;
-  const protocol = publicUrl.protocol === 'https:' ? 'icecasts' : 'icecast';
-  return `${protocol}://${publicUrl.username}:${publicUrl.password}@${publicUrl.host}${publicUrl.pathname}${publicUrl.search}`;
+  const port = Number(publicUrl.port || (publicUrl.protocol === 'https:' ? 443 : 80));
+  const protocol = port === 443 ? 'https' : port === 80 ? 'http' : publicUrl.protocol === 'https:' ? 'icecasts' : 'icecast';
+  const defaultPort = (protocol === 'https' && port === 443) || (protocol === 'http' && port === 80);
+  const host = defaultPort ? publicUrl.hostname : publicUrl.host;
+  return `${protocol}://${publicUrl.username}:${publicUrl.password}@${host}${publicUrl.pathname}${publicUrl.search}`;
+}
+
+export function usesLegacyIcecastSource(config: IcecastSourceConfig): boolean {
+  const publicUrl = new URL(config.url);
+  const port = Number(publicUrl.port || (publicUrl.protocol === 'https:' ? 443 : 80));
+  return port !== 80 && port !== 443;
 }
 
 function buildIcecastArgs(entry: PlaybackPlanEntry, config: IcecastSourceConfig): string[] {
-  return [
+  const args = [
     '-hide_banner',
     '-nostdin',
     '-loglevel',
@@ -70,24 +79,38 @@ function buildIcecastArgs(entry: PlaybackPlanEntry, config: IcecastSourceConfig)
     '-i',
     entry.filePath,
     '-vn',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
     '-codec:a',
-    'libmp3lame',
+    'aac',
     '-b:a',
     `${config.bitrateKbps}k`,
+    '-profile:a',
+    'aac_low',
+    '-user_agent',
+    'RadioTEDU Broadcast Wall',
     '-ice_name',
     config.name,
     '-ice_description',
     config.description,
     '-ice_genre',
     config.genre,
+    '-ice_url',
+    'https://radiotedu.com',
     '-ice_public',
-    'false',
+    '1',
     '-content_type',
-    'audio/mpeg',
+    'audio/aac',
     '-f',
-    'mp3',
-    authenticatedOutputUrl(config),
+    'adts',
   ];
+  if (usesLegacyIcecastSource(config)) {
+    args.push('-legacy_icecast', '1');
+  }
+  args.push(buildAuthenticatedIcecastOutputUrl(config));
+  return args;
 }
 
 async function streamEntry(
@@ -181,7 +204,7 @@ export function createIcecastPlaybackController(
   const queue: PlaybackPlanEntry[] = [];
   let status: PlaybackStatus = {
     state: 'idle',
-    codec: 'icecast-mp3',
+    codec: 'icecast-aac',
     streamUrl: sanitizeIcecastStatusUrl(config.url),
     queuedEntries: 0,
     lastError: null,

@@ -1,5 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { reconnectDelayMs, sanitizeIcecastStatusUrl, toIcecastErrorCode } from './icecastStreamer';
+import {
+  buildAuthenticatedIcecastOutputUrl,
+  reconnectDelayMs,
+  sanitizeIcecastStatusUrl,
+  toIcecastErrorCode,
+  usesLegacyIcecastSource,
+} from './icecastStreamer';
+import type { IcecastSourceConfig } from './types';
+
+const sourceConfig: IcecastSourceConfig = {
+  enabled: true,
+  url: 'https://stream.example.test/ai',
+  username: 'source',
+  password: 'p@ss word',
+  bitrateKbps: 192,
+  name: 'RadioTEDU Voting',
+  genre: 'RadioTEDU',
+  description: 'Voting stream',
+};
 
 describe('icecast streamer secret redaction', () => {
   it('exposes only fixed error codes for raw and encoded credential diagnostics', () => {
@@ -22,5 +40,15 @@ describe('icecast streamer secret redaction', () => {
     expect([1, 2, 3, 4, 5, 6, 20].map((attempt) => reconnectDelayMs(attempt))).toEqual([
       2000, 4000, 8000, 16000, 32000, 60000, 60000,
     ]);
+  });
+
+  it('uses the working HTTPS source method on port 443 instead of legacy icecast mode', () => {
+    expect(buildAuthenticatedIcecastOutputUrl(sourceConfig)).toBe(
+      'https://source:p%40ss%20word@stream.example.test/ai',
+    );
+    expect(buildAuthenticatedIcecastOutputUrl({ ...sourceConfig, url: 'http://stream.example.test:11154/ai' }))
+      .toBe('icecast://source:p%40ss%20word@stream.example.test:11154/ai');
+    expect(usesLegacyIcecastSource(sourceConfig)).toBe(false);
+    expect(usesLegacyIcecastSource({ ...sourceConfig, url: 'http://stream.example.test:11154/ai' })).toBe(true);
   });
 });

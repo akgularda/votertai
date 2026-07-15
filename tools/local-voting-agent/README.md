@@ -1,6 +1,6 @@
 # RadioTEDU Local Voting Radio Agent
 
-This Windows-side agent turns a local music folder into the listener-controlled RadioTEDU Voting channel. It owns the Icecast `/ai` mount, keeps music playing when no voting round is active, and uses the winning candidate as the next track.
+This Windows-side agent turns a local music folder into the listener-controlled RadioTEDU Voting channel. It owns the Icecast `/ai` mount, keeps music playing when no voting round is active, and uses the winning candidate as the next track. The TinyIce source uses the same AAC-LC/ADTS profile and legacy `SOURCE` handshake as RadioTEDU Broadcast Wall.
 
 The Voting agent is isolated from Juke Local and BroadcastAI. It has its own process, localhost API, WebSocket identity, secret, logs, and startup supervisor.
 
@@ -19,7 +19,7 @@ The current track and a recent-track window are excluded from candidate selectio
 
 ```text
 Music PC (this agent) -- outbound WSS --> radiotedu.com backend
-Music PC (FFmpeg)     -- Icecast source --> stream.radiotedu.com:11154/ai
+Music PC (FFmpeg legacy SOURCE) -- Icecast source --> stream.radiotedu.com:11154/ai
 Mobile app            -- HTTPS/WSS --> radiotedu.com backend
 Listeners             -- Icecast listener --> /ai
 ```
@@ -106,7 +106,7 @@ Install the per-user Startup launcher and crash supervisor:
 powershell -ExecutionPolicy Bypass -File .\scripts\install-voting-startup.ps1
 ```
 
-The music folder is rescanned every 60 seconds without restarting playback, so newly added or removed tracks automatically reach future voting rounds. The supervisor restarts the agent after crashes or loss of port 4317. The launcher starts it again after Windows sign-in. Icecast and backend WebSocket connections retry indefinitely with bounded backoff. Runtime logs are written to `runtime-logs/` and ignored by Git.
+The music folder is rescanned every 60 seconds without restarting playback, so newly added or removed tracks automatically reach future voting rounds. The supervisor restarts the agent after crashes or loss of port 4317. The launcher starts it again after Windows sign-in. The TinyIce source port automatically uses FFmpeg's legacy `SOURCE` handshake; Icecast and backend WebSocket connections retry indefinitely with bounded backoff. Runtime logs are written to `runtime-logs/` and ignored by Git.
 
 ## Health Checks
 
@@ -120,7 +120,7 @@ Invoke-RestMethod http://127.0.0.1:4317/api/state
 Verify the public audio path with FFmpeg:
 
 ```powershell
-ffmpeg -hide_banner -loglevel error -t 5 -i http://stream.radiotedu.com:11154/ai -f null NUL
+ffmpeg -hide_banner -loglevel error -t 5 -i https://stream.radiotedu.com/ai -f null NUL
 ```
 
 ## Safety Boundaries
