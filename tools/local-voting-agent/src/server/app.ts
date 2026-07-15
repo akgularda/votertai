@@ -662,7 +662,13 @@ export function createApp(options: CreateAppOptions): express.Express {
 
   app.post('/api/rounds/start', async (req, res) => {
     candidateCount = normalizeCandidateCount(req.body?.candidateCount ?? candidateCount);
-    await startRound(observedPlaybackKey, observedSongId);
+    const currentEndsAt = options.playbackController?.status().currentEndsAt;
+    const currentEndsAtMs = currentEndsAt ? Date.parse(currentEndsAt) : Number.NaN;
+    await startRound(
+      observedPlaybackKey,
+      observedSongId,
+      Number.isFinite(currentEndsAtMs) ? currentEndsAtMs : undefined,
+    );
 
     res.status(currentRound ? 201 : 409).json(state());
   });

@@ -1,6 +1,6 @@
 # RadioTEDU Local Voting Radio Agent
 
-This Windows-side agent turns a local music folder into the listener-controlled RadioTEDU Voting channel. It owns the Icecast `/ai` mount, keeps music playing when no voting round is active, and uses the winning candidate as the next track. The TinyIce source uses the same AAC-LC/ADTS profile and legacy `SOURCE` handshake as RadioTEDU Broadcast Wall.
+This Windows-side agent turns a local music folder into the listener-controlled RadioTEDU Voting channel. It owns the Icecast `/ai` mount, keeps music playing when no voting round is active, and uses the winning candidate as the next track. The source uses the same AAC-LC/ADTS profile as RadioTEDU Broadcast Wall and publishes through the production HTTP source ingress.
 
 The Voting agent is isolated from Juke Local and BroadcastAI. It has its own process, localhost API, WebSocket identity, secret, logs, and startup supervisor.
 
@@ -19,7 +19,7 @@ The current track and a recent-track window are excluded from candidate selectio
 
 ```text
 Music PC (this agent) -- outbound WSS --> radiotedu.com backend
-Music PC (FFmpeg legacy SOURCE) -- Icecast source --> stream.radiotedu.com:11154/ai
+Music PC (FFmpeg HTTP source) -- Icecast source --> stream.radiotedu.com/ai
 Mobile app            -- HTTPS/WSS --> radiotedu.com backend
 Listeners             -- Icecast listener --> /ai
 ```
@@ -63,7 +63,7 @@ VOTING_RECENT_TRACK_LIMIT=8
 VOTING_AGENT_PLAYBACK_MODE=live
 
 ICECAST_STREAM_ENABLED=true
-ICECAST_SOURCE_URL=http://stream.radiotedu.com:11154/ai
+ICECAST_SOURCE_URL=http://stream.radiotedu.com/ai
 ICECAST_SOURCE_USERNAME=<source-user>
 ICECAST_SOURCE_PASSWORD=<source-password>
 
@@ -106,7 +106,7 @@ Install the per-user Startup launcher and crash supervisor:
 powershell -ExecutionPolicy Bypass -File .\scripts\install-voting-startup.ps1
 ```
 
-The music folder is rescanned every 60 seconds without restarting playback, so newly added or removed tracks automatically reach future voting rounds. The supervisor restarts the agent after crashes or loss of port 4317. The launcher starts it again after Windows sign-in. The TinyIce source port automatically uses FFmpeg's legacy `SOURCE` handshake; Icecast and backend WebSocket connections retry indefinitely with bounded backoff. Runtime logs are written to `runtime-logs/` and ignored by Git.
+The music folder is rescanned every 60 seconds without restarting playback, so newly added or removed tracks automatically reach future voting rounds. The supervisor restarts the agent after crashes or loss of port 4317. The launcher starts it again after Windows sign-in. Icecast and backend WebSocket connections retry indefinitely with bounded backoff. The production `/ai` source ingress is HTTP on port 80; port 11154 currently resets this source after the first packets and must not be used by Voting. Runtime logs are written to `runtime-logs/` and ignored by Git.
 
 ## Health Checks
 
@@ -116,6 +116,40 @@ Invoke-RestMethod http://127.0.0.1:4317/api/state
 ```
 
 `/api/health` reports catalog size, playback state, and backend connection state without exposing local paths or secrets.
+
+## Start or Recover a Production Voting Round
+
+The normal automation opens a three-candidate round 60 seconds before the
+current song ends. To open one immediately and verify that it reached the
+production website, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-production-voting-round.ps1
+```
+
+The command is idempotent: if production already has an open round, it reports
+that round instead of creating another one. It waits for both the outbound
+backend connection and Icecast playback, starts a round through the loopback
+agent API, and then verifies the same round through the public RadioTEDU API.
+It does not read or modify WordPress, personal accounts, or unrelated radio
+mounts.
+
+If the dedicated Voting process is unhealthy, restart only that process and
+then perform the same verification:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-production-voting-round.ps1 -RestartAgent
+```
+
+Successful output contains `result: started`, `result: already_running`, or
+`result: recovered_existing`, an open `roundId`, three candidates, and the
+public vote-page URL. The exact public checks are:
+
+```powershell
+Invoke-RestMethod https://radiotedu.com/jukebox/api/v1/next-song-voting/status
+Invoke-RestMethod https://radiotedu.com/jukebox/api/v1/next-song-voting/rounds/active
+Invoke-WebRequest https://radiotedu.com/vote/
+```
 
 Verify the public audio path with FFmpeg:
 

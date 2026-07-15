@@ -998,4 +998,53 @@ describe('local voting API', () => {
     expect(enqueued).toHaveLength(1);
     expect(playbackStatus.currentTitle).toBe('Current');
   });
+
+  it('gives a manually started production round the current track deadline', async () => {
+    const now = Date.now();
+    const currentEndsAt = new Date(now + 180_000).toISOString();
+    const playbackStatus: PlaybackStatus = {
+      state: 'playing',
+      codec: 'icecast-aac',
+      streamUrl: 'https://stream.example.test/ai',
+      currentKind: 'filler',
+      currentTitle: 'Current',
+      currentFilePath: 'C:/Music/current.mp3',
+      currentSongId: 'song-current',
+      currentDurationSeconds: 240,
+      currentStartedAt: new Date(now - 60_000).toISOString(),
+      currentEndsAt,
+      queuedEntries: 0,
+      lastError: null,
+      updatedAt: new Date(now - 60_000).toISOString(),
+    };
+    const published: VotingRound[] = [];
+    const app = createApp({
+      songs,
+      playbackMode: 'live',
+      playbackController: {
+        enqueue: () => playbackStatus,
+        status: () => playbackStatus,
+      },
+      backendClient: {
+        async publishRound(round) {
+          published.push(round);
+        },
+        async fetchActiveRound() {
+          return published.at(-1) ?? null;
+        },
+        connectionState: () => 'connected',
+      },
+      automationTickMs: 0,
+      votingLockBeforeEndMs: 10_000,
+      rng: () => 0,
+    });
+
+    const response = await request(app).post('/api/rounds/start').send({ candidateCount: 3 });
+
+    expect(response.status).toBe(201);
+    expect(response.body.backendSyncError).toBeNull();
+    expect(response.body.round.lockAt).toBe(new Date(Date.parse(currentEndsAt) - 10_000).toISOString());
+    expect(response.body.round.resolveAt).toBe(response.body.round.lockAt);
+    expect(published).toHaveLength(1);
+  });
 });
