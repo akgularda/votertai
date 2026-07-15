@@ -1,0 +1,393 @@
+import { Router, Request, Response } from 'express';
+import { z } from 'zod';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { db } from '../db';
+import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { upload } from '../middleware/upload';
+import { sendSuccess, sendError } from '../utils/response';
+import { ROLES } from '../middleware/rbac';
+import { normalizeText } from '../utils/textNormalization';
+import { getIstanbulYearMonth } from '../services/jukeboxScoring';
+import { JWT_SECRET } from '../middleware/auth';
+
+const router = Router();
+
+const IS_TEST_ENV = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
+
+// In production these are asserted at startup (see server.ts). A deterministic
+// default is only allowed under tests so the suite can run without secrets.
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || (IS_TEST_ENV ? 'test-refresh-secret-key' : '');
+
+const SUPPORTED_ONBOARDING_LANGUAGES = ['en', 'tr', 'ru', 'ar', 'de', 'nl'] as const;
+const CURRENT_YEAR = new Date().getUTCFullYear();
+
+const registerSchema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+    display_name: z.string().min(2).max(100),
+    birth_year: z.number().int().min(1900).max(CURRENT_YEAR).optional(),
+    preferred_language: z.enum(SUPPORTED_ONBOARDING_LANGUAGES).optional(),
+});
+
+const ALLOWED_REGISTRATION_EMAIL_DOMAINS = new Set([
+    'gmail.com',
+    'googlemail.com',
+    'outlook.com',
+    'hotmail.com',
+    'live.com',
+    'msn.com',
+    'icloud.com',
+    'me.com',
+    'mac.com',
+    'yahoo.com',
+    'yandex.com',
+    'proton.me',
+    'protonmail.com',
+    'tedu.edu.tr',
+    'radiotedu.com',
+]);
+
+export function getEmailDomain(email: string): string {
+    return String(email).trim().toLowerCase().split('@').pop() ?? '';
+}
+
+export function isAllowedRegistrationEmail(email: string): boolean {
+    const domain = getEmailDomain(email);
+    return ALLOWED_REGISTRATION_EMAIL_DOMAINS.has(domain) || domain.endsWith('.edu.tr');
+}
+
+export function normalizeDisplayNameInput(displayName: string): string {
+    return normalizeText(displayName);
+}
+
+export function mapCurrentUserProfile(row: Record<string, unknown>) {
+    return {
+        id: row.id,
+        email: row.email,
+        display_name: row.display_name,
+        avatar_url: row.avatar_url ?? null,
+        rank_score: Number(row.rank_score ?? 0),
+        monthly_rank_score: Number(row.monthly_rank_score ?? 0),
+        is_guest: Boolean(row.is_guest),
+        total_songs_added: Number(row.total_songs_added ?? 0),
+        total_upvotes_received: Number(row.total_upvotes_received ?? 0),
+        role: row.role,
+        last_super_vote_at: row.last_super_vote_at ?? null,
+        birth_year: row.birth_year ?? null,
+        preferred_language: row.preferred_language ?? null,
+        gold_balance: Number(row.gold_balance ?? 0),
+    };
+}
+
+export function mapAuthSessionUser(row: Record<string, unknown>) {
+    const isGuest = Boolean(row.is_guest);
+    return {
+        id: row.id,
+        email: row.email,
+        display_name: row.display_name,
+        avatar_url: row.avatar_url ?? null,
+        rank_score: Number(row.rank_score ?? 0),
+        is_guest: isGuest,
+        role: row.role ?? (isGuest ? ROLES.GUEST : ROLES.USER),
+        total_songs_added: Number(row.total_songs_added ?? 0),
+        total_upvotes_received: Number(row.total_upvotes_received ?? 0),
+        last_super_vote_at: row.last_super_vote_at ?? null,
+        birth_year: row.birth_year ?? null,
+        preferred_language: row.preferred_language ?? null,
+        gold_balance: Number(row.gold_balance ?? 0),
+    };
+}
+
+// Helper to generate and store tokens
+async function createAuthSession(userId: string, email: string, role: string) {
+    const accessToken = jwt.sign(
+        { id: userId, email, role },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+    );
+
+    const refreshToken = jwt.sign(
+        { id: userId, email, role },
+        JWT_REFRESH_SECRET,
+        { expiresIn: '30d' }
+    );
+
+    const refreshTokenHash = await bcrypt.hash(refreshToken, 10);
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30); // 30 days
+
+    // Store in DB
+    await db.query(
+        'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+        [userId, refreshTokenHash, expiresAt]
+    );
+
+    return {
+        access_token: accessToken,
+        refresh_token: refreshToken
+    };
+}
+
+router.post('/register', async (req: Request, res: Response) => {
+    try {
+        const { email, password, display_name, birth_year, preferred_language } = registerSchema.parse(req.body);
+        const normalizedEmail = email.trim().toLowerCase();
+        const normalizedDisplayName = normalizeDisplayNameInput(display_name);
+
+        if (!isAllowedRegistrationEmail(normalizedEmail)) {
+            return sendError(res, 'Unsupported email provider', 400);
+        }
+
+        if (normalizedDisplayName.length < 2) {
+            return sendError(res, 'Display name required', 400);
+        }
+
+        // Check if user exists
+        const existing = await db.query('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
+        if (existing.rows[0]) {
+            return sendError(res, 'Email already registered', 400);
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        const result = await db.query(
+            `INSERT INTO users (email, password_hash, display_name, role, last_ip, user_agent, birth_year, preferred_language)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+            [normalizedEmail, hashedPassword, normalizedDisplayName, ROLES.USER, req.ip, req.headers['user-agent'], birth_year ?? null, preferred_language ?? null]
+        );
+
+        const user = result.rows[0];
+        const tokens = await createAuthSession(user.id, user.email, user.role);
+
+        return sendSuccess(res, { user: mapAuthSessionUser(user), ...tokens }, 'Registration successful', null, 201);
+    } catch (error) {
+        console.error('Registration failed:', error);
+        return sendError(res, 'Registration failed', 400);
+    }
+});
+
+router.post('/login', async (req: Request, res: Response) => {
+    try {
+        const { email, password } = req.body;
+        const result = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+
+        if (!result.rows[0]) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        const user = result.rows[0];
+        const valid = await bcrypt.compare(password, user.password_hash);
+
+        if (!valid) {
+            return sendError(res, 'Invalid credentials', 401);
+        }
+
+        // Update last IP and UA on login
+        await db.query('UPDATE users SET last_ip = $1, user_agent = $2 WHERE id = $3', [req.ip, req.headers['user-agent'], user.id]);
+
+        const tokens = await createAuthSession(user.id, user.email, user.role);
+        return sendSuccess(res, {
+            user: mapAuthSessionUser(user),
+            ...tokens
+        }, 'Login successful');
+    } catch (error) {
+        console.error('Login failed:', error);
+        return sendError(res, 'Login failed', 500);
+    }
+});
+
+router.post('/guest', async (req: Request, res: Response) => {
+    try {
+        const normalizedDisplayName = normalizeDisplayNameInput(req.body.display_name ?? '');
+        if (!normalizedDisplayName || normalizedDisplayName.length < 2) {
+            return res.status(400).json({ error: 'Display name required' });
+        }
+
+        // Generate a random guest email
+        const guestId = Math.random().toString(36).substring(7);
+        const email = `guest_${guestId}@radiotedu.internal`;
+
+        const result = await db.query(
+            `INSERT INTO users (email, password_hash, display_name, is_guest, role, last_ip, user_agent)
+             VALUES ($1, NULL, $2, TRUE, $3, $4, $5) RETURNING *`,
+            [email, normalizedDisplayName, ROLES.GUEST, req.ip, req.headers['user-agent']]
+        );
+
+        const user = result.rows[0];
+        const tokens = await createAuthSession(user.id, user.email, ROLES.GUEST);
+
+        return sendSuccess(res, {
+            user: mapAuthSessionUser(user),
+            ...tokens
+        }, 'Guest login successful', null, 201);
+    } catch (error) {
+        console.error('Guest login failed:', error);
+        return sendError(res, 'Guest login failed', 500);
+    }
+});
+
+router.post('/refresh', async (req: Request, res: Response) => {
+    try {
+        const { refresh_token } = req.body;
+        if (!refresh_token) return res.status(400).json({ error: 'Refresh token required' });
+
+        const decoded = jwt.verify(
+            refresh_token,
+            JWT_REFRESH_SECRET
+        ) as any;
+
+        // Verify token exists in DB
+        const result = await db.query(
+            'SELECT id, token_hash FROM refresh_tokens WHERE user_id = $1 AND expires_at > NOW()',
+            [decoded.id]
+        );
+
+        // Find match (tokens are rotated, so there might be multiple if handled incorrectly,
+        // but here we rotate on match)
+        let matchedTokenId = null;
+        for (const row of result.rows) {
+            const isValid = await bcrypt.compare(refresh_token, row.token_hash);
+            if (isValid) {
+                matchedTokenId = row.id;
+                break;
+            }
+        }
+
+        if (!matchedTokenId) {
+            return sendError(res, 'Invalid or expired refresh token', 401);
+        }
+
+        // Token Rotation: Delete old token, create new pair
+        await db.query('DELETE FROM refresh_tokens WHERE id = $1', [matchedTokenId]);
+
+        const tokens = await createAuthSession(decoded.id, decoded.email, decoded.role);
+        return sendSuccess(res, tokens, 'Token refreshed');
+    } catch (error) {
+        return sendError(res, 'Invalid refresh token', 401);
+    }
+});
+
+export async function handleCurrentUserProfileRequest(req: AuthRequest, res: Response) {
+    try {
+        const currentYearMonth = getIstanbulYearMonth(new Date());
+        const result = await db.query(
+            `SELECT u.id,
+                    u.email,
+                    u.display_name,
+                    u.avatar_url,
+                    u.is_guest,
+                    u.rank_score,
+                    u.total_songs_added,
+                    u.total_upvotes_received,
+                    u.role,
+                    u.last_super_vote_at,
+                    u.birth_year,
+                    u.preferred_language,
+                    COALESCE(up.spendable_points, 0) AS gold_balance,
+                    COALESCE(ums.score, 0) AS monthly_rank_score
+             FROM users u
+             LEFT JOIN user_monthly_rank_scores ums
+               ON ums.user_id = u.id AND ums.year_month = $2
+             LEFT JOIN user_points up ON up.user_id = u.id
+             WHERE u.id = $1`,
+            [req.user?.id, currentYearMonth]
+        );
+
+        if (!result.rows[0]) {
+            return sendError(res, 'User not found', 404);
+        }
+
+        return sendSuccess(res, mapCurrentUserProfile(result.rows[0] as Record<string, unknown>));
+    } catch (error) {
+        return sendError(res, 'Failed to fetch profile', 500);
+    }
+}
+
+router.get('/me', authMiddleware, handleCurrentUserProfileRequest);
+
+export async function handleUnifiedAccountSessionRequest(req: AuthRequest, res: Response) {
+    try {
+        const currentYearMonth = getIstanbulYearMonth(new Date());
+        const result = await db.query(
+            `SELECT u.id,
+                    u.email,
+                    u.display_name,
+                    u.avatar_url,
+                    u.is_guest,
+                    u.rank_score,
+                    u.total_songs_added,
+                    u.total_upvotes_received,
+                    u.role,
+                    u.last_super_vote_at,
+                    u.birth_year,
+                    u.preferred_language,
+                    COALESCE(ums.score, 0) AS monthly_rank_score,
+                    COALESCE(up.spendable_points, 0) AS gold_balance,
+                    COALESCE(up.lifetime_points, 0) AS lifetime_gold_earned
+             FROM users u
+             LEFT JOIN user_monthly_rank_scores ums
+               ON ums.user_id = u.id AND ums.year_month = $2
+             LEFT JOIN user_points up
+               ON up.user_id = u.id
+             WHERE u.id = $1`,
+            [req.user?.id, currentYearMonth]
+        );
+
+        const row = result.rows[0] as Record<string, unknown> | undefined;
+        if (!row) {
+            return sendError(res, 'User not found', 404);
+        }
+
+        return sendSuccess(res, {
+            user: mapCurrentUserProfile(row),
+            account: {
+                scope: 'radiotedu',
+                surfaces: {
+                    mobile: true,
+                    social: true,
+                    jukebox: true,
+                    'study-library': true,
+                    spark: false,
+                    rock: false,
+                },
+            },
+            points: {
+                gold_balance: Number(row.gold_balance ?? 0),
+                lifetime_gold_earned: Number(row.lifetime_gold_earned ?? 0),
+            },
+            endpoints: {
+                social: '/social/',
+                auth: '/api/v1/auth',
+                study: '/api/v1/study',
+                jukebox: '/api/v1/jukebox',
+            },
+        });
+    } catch (error) {
+        return sendError(res, 'Failed to fetch account session', 500);
+    }
+}
+
+router.get('/session', authMiddleware, handleUnifiedAccountSessionRequest);
+
+router.post('/upload-avatar', authMiddleware, upload.single('avatar'), async (req: AuthRequest, res: Response) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+
+        const avatarUrl = `/uploads/avatars/${req.file.filename}`;
+
+        await db.query(
+            'UPDATE users SET avatar_url = $1 WHERE id = $2',
+            [avatarUrl, req.user?.id]
+        );
+
+        return sendSuccess(res, { avatar_url: avatarUrl });
+    } catch (error) {
+        console.error('Avatar upload failed:', error);
+        res.status(500).json({ error: 'Upload failed' });
+    }
+});
+
+export default router;

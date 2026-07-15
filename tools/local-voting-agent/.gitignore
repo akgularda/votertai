@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*.bak
+var/
+runtime-logs/
+node_modules.partial/
+npm-debug.log*

@@ -1,0 +1,133 @@
+# RadioTEDU Local Voting Radio Agent
+
+This Windows-side agent turns a local music folder into the listener-controlled RadioTEDU Voting channel. It owns the Icecast `/ai` mount, keeps music playing when no voting round is active, and uses the winning candidate as the next track.
+
+The Voting agent is isolated from Juke Local and BroadcastAI. It has its own process, localhost API, WebSocket identity, secret, logs, and startup supervisor.
+
+## Playback Lifecycle
+
+1. A random enabled track starts when the queue is empty.
+2. At 60 seconds before the current track ends, the agent selects three eligible candidates and publishes a round.
+3. The current track continues without being cut.
+4. At 10 seconds before the end, voting locks and the backend resolves the winner from registered-user ballots.
+5. The winner is queued once and plays after the current track.
+6. With no votes, the agent selects a fallback candidate. Ties are resolved among the tied leaders.
+
+The current track and a recent-track window are excluded from candidate selection. Disabled songs are never selected.
+
+## Architecture
+
+```text
+Music PC (this agent) -- outbound WSS --> radiotedu.com backend
+Music PC (FFmpeg)     -- Icecast source --> stream.radiotedu.com:11154/ai
+Mobile app            -- HTTPS/WSS --> radiotedu.com backend
+Listeners             -- Icecast listener --> /ai
+```
+
+The backend never reads the Music PC filesystem. Candidate metadata and small validated cover assets travel through the dedicated outbound WebSocket. Local paths and source credentials are never sent.
+
+## Requirements
+
+- Windows 10/11
+- Node.js 20.6 or newer
+- npm
+- FFmpeg and ffprobe
+- An Icecast source account authorized for `/ai`
+
+## Install
+
+```powershell
+npm install
+Copy-Item .env.example .env
+```
+
+Configure `.env`, then verify:
+
+```powershell
+npm test
+npm run build
+npm run dashboard
+```
+
+The local dashboard and API listen only on `http://127.0.0.1:4317`.
+
+## Core Configuration
+
+```dotenv
+MUSIC_LIBRARY_DIR=C:\Users\tedu\Downloads\song
+MUSIC_LIBRARY_REFRESH_SECONDS=60
+CANDIDATE_COUNT=3
+VOTING_OPEN_BEFORE_END_SECONDS=60
+VOTING_LOCK_BEFORE_END_SECONDS=10
+VOTING_RECENT_TRACK_LIMIT=8
+VOTING_AGENT_PLAYBACK_MODE=live
+
+ICECAST_STREAM_ENABLED=true
+ICECAST_SOURCE_URL=http://stream.radiotedu.com:11154/ai
+ICECAST_SOURCE_USERNAME=<source-user>
+ICECAST_SOURCE_PASSWORD=<source-password>
+
+BACKEND_SYNC_ENABLED=true
+RADIO_AGENT_TRANSPORT=websocket
+RADIO_AGENT_CONNECT_URL=wss://radiotedu.com/jukebox/api/v1/next-song-voting/agent/connect
+RADIO_AGENT_ID=school-radio-pc
+RADIO_AGENT_REQUEST_SECRET=<dedicated-voting-secret>
+```
+
+Do not reuse Juke Local's agent ID or secret. Do not commit `.env` or log its contents.
+
+## Music And Cover Art
+
+Supported audio formats include AAC, FLAC, M4A, MP3, OGG, WAV, and WebM. The scanner reads metadata with ffprobe and falls back to `Artist - Song` filenames.
+
+Cover discovery checks:
+
+- a matching image beside the audio file
+- `cover`, `folder`, `front`, or `album` images
+- embedded artwork or a video frame when the source contains one
+
+Cover assets sent to the backend are limited to JPEG, PNG, or WebP and 1.5 MB. A RadioTEDU fallback image should be used when no real cover exists.
+
+## Dedicated WebSocket Contract
+
+The agent connects outbound using protocol `radiotedu-radio-agent/v1` and these headers:
+
+- `x-radio-agent-id`
+- `x-radio-agent-timestamp`
+- `x-radio-agent-signature`
+
+The signature is base64url HMAC-SHA256 of `<agent-id>:<unix-seconds>`. Supported request methods are `round.publish`, `round.active`, and `round.resolve`. The client reconnects every five seconds and answers backend ping messages.
+
+## Windows Startup
+
+Install the per-user Startup launcher and crash supervisor:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-voting-startup.ps1
+```
+
+The music folder is rescanned every 60 seconds without restarting playback, so newly added or removed tracks automatically reach future voting rounds. The supervisor restarts the agent after crashes or loss of port 4317. The launcher starts it again after Windows sign-in. Icecast and backend WebSocket connections retry indefinitely with bounded backoff. Runtime logs are written to `runtime-logs/` and ignored by Git.
+
+## Health Checks
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:4317/api/health
+Invoke-RestMethod http://127.0.0.1:4317/api/state
+```
+
+`/api/health` reports catalog size, playback state, and backend connection state without exposing local paths or secrets.
+
+Verify the public audio path with FFmpeg:
+
+```powershell
+ffmpeg -hide_banner -loglevel error -t 5 -i http://stream.radiotedu.com:11154/ai -f null NUL
+```
+
+## Safety Boundaries
+
+- `/ai` belongs exclusively to Voting.
+- Juke Local's AI mirror and autoplay must remain disabled.
+- `/radio`, `/spark`, and other Icecast mounts are not modified.
+- The local API binds to loopback and is not opened in Windows Firewall.
+- The Music PC initiates WSS; no inbound port, router forwarding, SMB, or public IP is needed.
+- The mobile app never connects directly to the Music PC.
