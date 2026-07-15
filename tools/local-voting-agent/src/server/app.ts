@@ -341,7 +341,7 @@ export function createApp(options: CreateAppOptions): express.Express {
       const canResume =
         (activeRound.status === 'open' || activeRound.status === 'locked') &&
         Number.isFinite(resolveAtMs) &&
-        ((scheduleMatchesCurrentTrack && isFutureActiveRound) || isRecoverableElapsedLockedRound) &&
+        (isFutureActiveRound || isRecoverableElapsedLockedRound) &&
         Boolean(restoredRound);
 
       if (canResume && restoredRound) {
