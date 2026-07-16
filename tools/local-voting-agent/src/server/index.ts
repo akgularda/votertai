@@ -5,7 +5,7 @@ import { loadAgentConfig } from '../agent/config';
 import { createBackendVotingClient } from '../agent/backendClient';
 import { startCatalogRefresh } from '../agent/catalogRefresh';
 import { createIcecastPlaybackController } from '../agent/icecastStreamer';
-import { startIcecastRelay } from '../agent/icecastRelay';
+import { startIcecastPcmSink } from '../agent/icecastRelay';
 import { createLocalHttpPlaybackController } from '../agent/localHttpStreamer';
 import { createWallRuntimePlaybackController } from '../agent/wallRuntimePlaybackController';
 import { scanFolderCatalog, scanJingleCatalog } from '../agent/folderCatalog';
@@ -34,18 +34,14 @@ startCatalogRefresh({
 });
 const jingles = scanJingleCatalog(config.jingleRoots);
 const backendClient = createBackendVotingClient(config.backend);
+const localHttpStreamEnabled = process.env.LOCAL_HTTP_STREAM_ENABLED === 'true';
+const icecastPcmSink = localHttpStreamEnabled ? startIcecastPcmSink(config.icecast, config.ffmpegPath) : null;
 const playbackController =
-  process.env.LOCAL_HTTP_STREAM_ENABLED === 'true'
-    ? createLocalHttpPlaybackController(config.ffmpegPath, songs)
+  localHttpStreamEnabled
+    ? createLocalHttpPlaybackController(config.ffmpegPath, songs, undefined, icecastPcmSink)
     : process.env.WALL_RUNTIME_PLAYBACK_ENABLED === 'true'
     ? createWallRuntimePlaybackController()
     : createIcecastPlaybackController(config.icecast, config.ffmpegPath, songs);
-if (process.env.LOCAL_HTTP_STREAM_ENABLED === 'true' && playbackController) {
-  const localStreamUrl = playbackController.status().streamUrl;
-  if (localStreamUrl) {
-    startIcecastRelay(config.icecast, config.ffmpegPath, localStreamUrl);
-  }
-}
 const app = createApp({
   songs,
   jingles,

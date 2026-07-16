@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import type { PlaybackController } from './icecastStreamer';
+import type { IcecastPcmSink } from './icecastRelay';
 import type { CatalogSong, PlaybackPlan, PlaybackPlanEntry, PlaybackStatus } from './types';
 
 interface StreamEntry {
@@ -18,6 +19,7 @@ const PCM_SAMPLE_RATE = 48_000;
 const PCM_CHANNELS = 2;
 const PCM_BYTES_PER_SAMPLE = 2;
 const SILENCE_FRAME_MS = 20;
+const DECODER_STALL_MS = 2_000;
 const SILENCE_FRAME = Buffer.alloc(
   Math.floor((PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_BYTES_PER_SAMPLE * SILENCE_FRAME_MS) / 1000),
 );
@@ -75,6 +77,7 @@ export function createLocalHttpPlaybackController(
   ffmpegPath: string,
   songs: CatalogSong[],
   port = Number(process.env.LOCAL_HTTP_STREAM_PORT || 4320),
+  icecastPcmSink: IcecastPcmSink | null = null,
 ): PlaybackController {
   const codec = normalizeCodec(process.env.LOCAL_HTTP_STREAM_CODEC);
   const settings = codecSettings(codec);
@@ -88,7 +91,7 @@ export function createLocalHttpPlaybackController(
   let loopStarted = false;
   let encoderRestartTimer: NodeJS.Timeout | null = null;
   let pcmBackpressured = false;
-  let lastPcmWriteAt = 0;
+  let lastDecoderPcmAt = 0;
   let status: PlaybackStatus = {
     state: 'idle',
     codec,
@@ -165,20 +168,25 @@ export function createLocalHttpPlaybackController(
   }
 
   function writePcm(chunk: Buffer): void {
+    icecastPcmSink?.writePcm(chunk);
     startEncoder();
     if (!encoder || encoder.stdin.destroyed || !encoder.stdin.writable || pcmBackpressured) return;
-    lastPcmWriteAt = Date.now();
     if (!encoder.stdin.write(chunk)) {
       pcmBackpressured = true;
       current?.stdout.pause();
     }
   }
 
-  // Keep the encoder and every connected listener alive while a decoder starts,
-  // a file is skipped, or the next selected track is being opened.
+  // Keep the encoder and every connected listener alive only when no decoder
+  // exists. Injecting silence between normally paced decoder chunks would make
+  // the station run faster than realtime. A decoder that stops producing PCM
+  // is restarted instead, after which the no-decoder silence guard takes over.
   const silenceTimer = setInterval(() => {
-    if (Date.now() - lastPcmWriteAt >= SILENCE_FRAME_MS * 2) {
+    if (!current) {
       writePcm(SILENCE_FRAME);
+    } else if (Date.now() - lastDecoderPcmAt >= DECODER_STALL_MS) {
+      current.kill();
+      lastDecoderPcmAt = Date.now();
     }
   }, SILENCE_FRAME_MS);
   silenceTimer.unref();
@@ -205,6 +213,7 @@ export function createLocalHttpPlaybackController(
       updatedAt: new Date().toISOString(),
     };
     console.log(`Local HTTP stream: ${entry.kind} ${entry.title}`);
+    lastDecoderPcmAt = Date.now();
     current = spawn(ffmpegPath, [
       '-hide_banner',
       '-loglevel',
@@ -227,6 +236,7 @@ export function createLocalHttpPlaybackController(
 
     let started = false;
     current.stdout.on('data', (chunk: Buffer) => {
+      lastDecoderPcmAt = Date.now();
       if (!started) {
         started = true;
         status = {
@@ -254,6 +264,7 @@ export function createLocalHttpPlaybackController(
     } finally {
       current = null;
       currentKind = null;
+      lastDecoderPcmAt = 0;
       status = {
         ...status,
         state: queue.length > 0 ? 'queued' : 'idle',

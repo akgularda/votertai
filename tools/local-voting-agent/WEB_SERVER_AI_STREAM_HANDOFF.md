@@ -11,9 +11,11 @@ Icecast/TinyIce origin and the public TLS listener.
 - `GET /ai`: an unbounded chunked audio response
 - The encoder remains alive across tracks. A PCM silence guard keeps the byte
   stream continuous while a decoder starts or recovers.
-- A supervised relay continuously tries to publish that stream to
-  `http://10.98.98.75:11154/ai`. It uses the source credential stored only on
-  the Voting PC and retries forever with bounded backoff.
+- A supervised BroadcastAI-compatible PCM sink continuously encodes the same
+  48 kHz stereo PCM as AAC-LC 192 kbps ADTS and publishes it to
+  `http://10.98.98.75:11154/ai` with legacy Icecast source mode. It uses the
+  source credential stored only on the Voting PC and retries forever with
+  bounded backoff.
 
 No source password is required on the website/application host. Do not copy it
 from the Voting PC or add it to a prompt, repository, log, or proxy config.

@@ -1,65 +1,76 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { IcecastSourceConfig } from './types';
 import { buildAuthenticatedIcecastOutputUrl, reconnectDelayMs, usesLegacyIcecastSource } from './icecastStreamer';
 
-export interface IcecastRelayStatus {
+export interface IcecastSinkStatus {
   state: 'connecting' | 'connected' | 'retrying';
   attempt: number;
   lastError: string | null;
   updatedAt: string;
 }
 
-export function buildIcecastRelayArgs(inputUrl: string, config: IcecastSourceConfig): string[] {
+export interface IcecastPcmSink {
+  writePcm(chunk: Buffer): void;
+  status(): IcecastSinkStatus;
+}
+
+// This is intentionally the same continuous PCM -> AAC Icecast sink used by
+// RadioTEDU BroadcastAI. The only station-specific difference is mount /ai.
+export function buildIcecastPcmSinkArgs(config: IcecastSourceConfig): string[] {
   const args = [
     '-hide_banner',
-    '-nostdin',
     '-loglevel',
-    'warning',
-    '-reconnect',
-    '1',
-    '-reconnect_streamed',
-    '1',
-    '-reconnect_delay_max',
-    '5',
+    'error',
+    '-f',
+    's16le',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
     '-i',
-    inputUrl,
+    'pipe:0',
     '-vn',
     '-c:a',
-    'copy',
+    'aac',
+    '-b:a',
+    `${config.bitrateKbps}k`,
+    '-profile:a',
+    'aac_low',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
     '-content_type',
-    'audio/mpeg',
+    'audio/aac',
+    '-f',
+    'adts',
+  ];
+  if (usesLegacyIcecastSource(config)) {
+    args.push('-legacy_icecast', '1');
+  }
+  args.push(
     '-user_agent',
-    'RadioTEDU Voting Relay',
+    'RadioTEDU Broadcast Wall',
     '-ice_name',
     config.name,
     '-ice_description',
     config.description,
     '-ice_genre',
     config.genre,
-    '-ice_url',
-    'https://radiotedu.com/vote/',
     '-ice_public',
     '1',
-    '-f',
-    'mp3',
-  ];
-  if (usesLegacyIcecastSource(config)) {
-    args.push('-legacy_icecast', '1');
-  }
-  args.push(buildAuthenticatedIcecastOutputUrl(config));
+    buildAuthenticatedIcecastOutputUrl(config),
+  );
   return args;
 }
 
-export function startIcecastRelay(
-  config: IcecastSourceConfig,
-  ffmpegPath: string,
-  inputUrl: string,
-): { status: () => IcecastRelayStatus } | null {
+export function startIcecastPcmSink(config: IcecastSourceConfig, ffmpegPath: string): IcecastPcmSink | null {
   if (!config.enabled) return null;
 
-  let stopped = false;
+  let child: ChildProcessWithoutNullStreams | null = null;
+  let backpressured = false;
   let failures = 0;
-  let status: IcecastRelayStatus = {
+  let status: IcecastSinkStatus = {
     state: 'connecting',
     attempt: 1,
     lastError: null,
@@ -67,7 +78,6 @@ export function startIcecastRelay(
   };
 
   const run = () => {
-    if (stopped) return;
     const startedAt = Date.now();
     status = {
       state: 'connecting',
@@ -75,46 +85,58 @@ export function startIcecastRelay(
       lastError: null,
       updatedAt: new Date().toISOString(),
     };
-    const child = spawn(ffmpegPath, buildIcecastRelayArgs(inputUrl, config), {
+    const connectingChild = spawn(ffmpegPath, buildIcecastPcmSinkArgs(config), {
       windowsHide: true,
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    child = connectingChild;
+    backpressured = false;
 
-    // FFmpeg may include the authenticated output URL in stderr. Drain it
-    // without retaining or printing credentials.
-    child.stderr.resume();
+    // FFmpeg may echo its authenticated output URL. Match BroadcastAI's sink
+    // behavior while never retaining or printing the credential-bearing line.
+    connectingChild.stdout.resume();
+    connectingChild.stderr.resume();
+    // Icecast can reset the source socket while PCM is being written. FFmpeg
+    // then closes stdin and Node emits EPIPE on this stream. That is a sink
+    // reconnect event, not a reason to crash the voting agent.
+    connectingChild.stdin.on('error', () => undefined);
+    connectingChild.stdin.on('drain', () => {
+      backpressured = false;
+    });
     const connectedTimer = setTimeout(() => {
-      if (child.exitCode === null && !child.killed) {
+      if (connectingChild.exitCode === null && !connectingChild.killed) {
         status = {
           state: 'connected',
           attempt: failures + 1,
           lastError: null,
           updatedAt: new Date().toISOString(),
         };
-        console.log(`[ICECAST RELAY] connected to ${new URL(config.url).host}${new URL(config.url).pathname}`);
+        const target = new URL(config.url);
+        console.log(`[ICECAST PCM SINK] connected to ${target.host}${target.pathname}`);
       }
-    }, 3_000);
+    }, 300);
 
-    child.once('error', () => {
+    connectingChild.once('error', () => {
       status = {
         state: 'retrying',
         attempt: failures + 1,
-        lastError: 'icecast_relay_spawn_failed',
+        lastError: 'icecast_pcm_sink_spawn_failed',
         updatedAt: new Date().toISOString(),
       };
     });
-    child.once('close', () => {
+    connectingChild.once('close', () => {
       clearTimeout(connectedTimer);
-      if (stopped) return;
+      if (child === connectingChild) child = null;
+      backpressured = false;
       failures = Date.now() - startedAt >= 15_000 ? 1 : failures + 1;
       const retryMs = reconnectDelayMs(failures, 1_000, 30_000);
       status = {
         state: 'retrying',
         attempt: failures + 1,
-        lastError: 'icecast_relay_disconnected',
+        lastError: 'icecast_pcm_sink_disconnected',
         updatedAt: new Date().toISOString(),
       };
-      console.error(`[ICECAST RELAY] disconnected; retrying in ${Math.ceil(retryMs / 1000)}s`);
+      console.error(`[ICECAST PCM SINK] disconnected; retrying in ${Math.ceil(retryMs / 1000)}s`);
       const timer = setTimeout(run, retryMs);
       timer.unref();
     });
@@ -122,6 +144,15 @@ export function startIcecastRelay(
 
   run();
   return {
+    writePcm(chunk) {
+      if (!child || child.exitCode !== null || child.killed || child.stdin.destroyed || backpressured) return;
+      try {
+        if (!child.stdin.write(chunk)) backpressured = true;
+      } catch {
+        // The close handler owns retry scheduling. A synchronous EPIPE here is
+        // the same source-disconnect race as the async stdin error above.
+      }
+    },
     status: () => ({ ...status }),
   };
 }

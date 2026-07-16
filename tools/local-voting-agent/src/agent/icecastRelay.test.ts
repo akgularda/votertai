@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildIcecastRelayArgs } from './icecastRelay';
+import { buildIcecastPcmSinkArgs } from './icecastRelay';
 import type { IcecastSourceConfig } from './types';
 
 const config: IcecastSourceConfig = {
@@ -7,19 +7,22 @@ const config: IcecastSourceConfig = {
   url: 'http://icecast.example.test:11154/ai',
   username: 'source',
   password: 'p@ss word',
-  bitrateKbps: 128,
+  bitrateKbps: 192,
   name: 'RadioTEDU Voting',
   genre: 'RadioTEDU',
   description: 'Voting radio',
 };
 
-describe('Icecast relay command', () => {
-  it('relays the persistent MP3 stream without transcoding and uses legacy Icecast source mode', () => {
-    const args = buildIcecastRelayArgs('http://127.0.0.1:4320/ai', config);
+describe('BroadcastAI-compatible Icecast PCM sink', () => {
+  it('keeps one PCM-fed AAC-LC ADTS source process on the /ai mount', () => {
+    const args = buildIcecastPcmSinkArgs(config);
 
-    expect(args).toContain('http://127.0.0.1:4320/ai');
-    expect(args).toContain('copy');
-    expect(args).toContain('audio/mpeg');
+    expect(args.slice(3, 13)).toEqual(['-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0', '-vn', '-c:a']);
+    expect(args).toContain('aac');
+    expect(args).toContain('192k');
+    expect(args).toContain('aac_low');
+    expect(args).toContain('audio/aac');
+    expect(args).toContain('adts');
     expect(args).toContain('-legacy_icecast');
     expect(args.at(-1)).toBe('icecast://source:p%40ss%20word@icecast.example.test:11154/ai');
   });
