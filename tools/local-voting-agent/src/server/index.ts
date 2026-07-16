@@ -5,6 +5,7 @@ import { loadAgentConfig } from '../agent/config';
 import { createBackendVotingClient } from '../agent/backendClient';
 import { startCatalogRefresh } from '../agent/catalogRefresh';
 import { createIcecastPlaybackController } from '../agent/icecastStreamer';
+import { startIcecastRelay } from '../agent/icecastRelay';
 import { createLocalHttpPlaybackController } from '../agent/localHttpStreamer';
 import { createWallRuntimePlaybackController } from '../agent/wallRuntimePlaybackController';
 import { scanFolderCatalog, scanJingleCatalog } from '../agent/folderCatalog';
@@ -39,6 +40,12 @@ const playbackController =
     : process.env.WALL_RUNTIME_PLAYBACK_ENABLED === 'true'
     ? createWallRuntimePlaybackController()
     : createIcecastPlaybackController(config.icecast, config.ffmpegPath, songs);
+if (process.env.LOCAL_HTTP_STREAM_ENABLED === 'true' && playbackController) {
+  const localStreamUrl = playbackController.status().streamUrl;
+  if (localStreamUrl) {
+    startIcecastRelay(config.icecast, config.ffmpegPath, localStreamUrl);
+  }
+}
 const app = createApp({
   songs,
   jingles,

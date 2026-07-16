@@ -266,7 +266,29 @@ export function createApp(options: CreateAppOptions): express.Express {
 
     try {
       const activeRound = await options.backendClient.fetchActiveRound();
-      if (!activeRound || activeRound.id !== currentRound.id) {
+      if (!activeRound) {
+        return;
+      }
+      if (activeRound.id !== currentRound.id) {
+        const restoredRound = restoreBackendRoundFromLocalCatalog(activeRound, options.songs);
+        const resolveAtMs = Date.parse(activeRound.resolveAt ?? '');
+        if (
+          restoredRound &&
+          (activeRound.status === 'open' || activeRound.status === 'locked') &&
+          Number.isFinite(resolveAtMs) &&
+          resolveAtMs > Date.now()
+        ) {
+          // A round already accepted by the backend is authoritative. This
+          // handles the startup race where local playout begins before the WSS
+          // handshake is ready and prevents an invisible local-only round.
+          currentRound = restoredRound;
+          candidateCount = normalizeCandidateCount(restoredRound.candidates.length);
+          playbackCommandPreview = null;
+          playbackPlanPreview = null;
+          backendSyncError = null;
+          return;
+        }
+        backendSyncError = 'backend_active_round_mismatch_during_vote_sync';
         return;
       }
       if (!candidateSetsMatch(currentRound.candidates, activeRound.candidates)) {
@@ -595,6 +617,11 @@ export function createApp(options: CreateAppOptions): express.Express {
         observedPlaybackKey = sourceKey;
         recentSongIds.unshift(song.id);
         recentSongIds.splice(options.recentTrackLimit ?? 8);
+      }
+
+      if (options.backendClient?.connectionState?.() === 'connecting') {
+        observedRemainingSeconds = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+        return;
       }
 
       if (!currentRound && Date.now() - lastBackendRecoveryAttemptAt >= 5_000) {

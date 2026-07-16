@@ -469,6 +469,51 @@ describe('local voting API', () => {
     expect(state.body.round.candidates[1].votes).toBe(5);
   });
 
+  it('adopts the authoritative backend round after a startup connection race', async () => {
+    let connected = false;
+    let activeRound: VotingRound | null = null;
+    const app = createApp({
+      songs,
+      rng: () => 0,
+      backendPollIntervalMs: 5,
+      backendClient: {
+        publishRound: async () => undefined,
+        fetchActiveRound: async () => {
+          if (!connected) throw new Error('radio_agent_websocket_not_connected');
+          return activeRound;
+        },
+        connectionState: () => (connected ? 'connected' : 'connecting'),
+      },
+    });
+    const local = await request(app).post('/api/rounds/start').send({ candidateCount: 2 });
+    expect(local.status).toBe(201);
+
+    activeRound = {
+      id: 'server-authoritative-round',
+      status: 'open',
+      openedAt: new Date().toISOString(),
+      lockAt: new Date(Date.now() + 40_000).toISOString(),
+      resolveAt: new Date(Date.now() + 50_000).toISOString(),
+      lockedAt: null,
+      resolvedAt: null,
+      candidates: [
+        { ...local.body.round.candidates[1], filePath: '', albumArtPath: null, votes: 4 },
+        { ...local.body.round.candidates[0], filePath: '', albumArtPath: null, votes: 1 },
+      ],
+      votes: [],
+      winnerCandidateId: null,
+      resolutionMode: null,
+    };
+    connected = true;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const state = await request(app).get('/api/state');
+    expect(state.body.round.id).toBe('server-authoritative-round');
+    expect(state.body.round.candidates.map((candidate: { votes: number }) => candidate.votes)).toEqual([4, 1]);
+    expect(state.body.round.candidates.every((candidate: { filePath: string }) => candidate.filePath.startsWith('C:/Music/'))).toBe(true);
+    expect(state.body.backendSyncError).toBeNull();
+  });
+
   it('keeps a live round locked and retries when authoritative resolve is too early', async () => {
     const now = Date.now();
     let playbackStatus: PlaybackStatus = {

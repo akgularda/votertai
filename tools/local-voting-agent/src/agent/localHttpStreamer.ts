@@ -14,6 +14,14 @@ interface StreamEntry {
   durationSeconds?: number;
 }
 
+const PCM_SAMPLE_RATE = 48_000;
+const PCM_CHANNELS = 2;
+const PCM_BYTES_PER_SAMPLE = 2;
+const SILENCE_FRAME_MS = 20;
+const SILENCE_FRAME = Buffer.alloc(
+  Math.floor((PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_BYTES_PER_SAMPLE * SILENCE_FRAME_MS) / 1000),
+);
+
 type LocalStreamCodec = 'mp3' | 'aac';
 
 function normalizeCodec(raw: string | undefined): LocalStreamCodec {
@@ -75,8 +83,12 @@ export function createLocalHttpPlaybackController(
   const clients = new Set<http.ServerResponse>();
   const queue: StreamEntry[] = [];
   let current: ChildProcessWithoutNullStreams | null = null;
+  let encoder: ChildProcessWithoutNullStreams | null = null;
   let currentKind: StreamEntry['kind'] | null = null;
   let loopStarted = false;
+  let encoderRestartTimer: NodeJS.Timeout | null = null;
+  let pcmBackpressured = false;
+  let lastPcmWriteAt = 0;
   let status: PlaybackStatus = {
     state: 'idle',
     codec,
@@ -88,18 +100,96 @@ export function createLocalHttpPlaybackController(
 
   function broadcast(chunk: Buffer): void {
     for (const client of clients) {
-      if (!client.destroyed) {
-        client.write(chunk);
+      if (client.destroyed) {
+        clients.delete(client);
+        continue;
       }
+      if (client.writableLength > 1024 * 1024) {
+        client.destroy();
+        clients.delete(client);
+        continue;
+      }
+      client.write(chunk);
     }
   }
+
+  function startEncoder(): void {
+    if (encoder && encoder.exitCode === null && !encoder.killed) return;
+    if (encoderRestartTimer) {
+      clearTimeout(encoderRestartTimer);
+      encoderRestartTimer = null;
+    }
+
+    encoder = spawn(ffmpegPath, [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-f',
+      's16le',
+      '-ar',
+      String(PCM_SAMPLE_RATE),
+      '-ac',
+      String(PCM_CHANNELS),
+      '-i',
+      'pipe:0',
+      '-vn',
+      ...settings.encoderArgs,
+      'pipe:1',
+    ], { windowsHide: true });
+    pcmBackpressured = false;
+    encoder.stdout.on('data', (chunk: Buffer) => broadcast(chunk));
+    encoder.stdin.on('drain', () => {
+      pcmBackpressured = false;
+      current?.stdout.resume();
+    });
+    encoder.stderr.on('data', (chunk: Buffer) => {
+      const line = chunk.toString('utf8').trim();
+      if (line) console.error(`Local HTTP stream encoder: ${line}`);
+    });
+    encoder.on('error', (error) => {
+      status = {
+        ...status,
+        state: 'error',
+        lastError: `local_stream_encoder:${error.message}`,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    encoder.on('close', () => {
+      encoder = null;
+      pcmBackpressured = false;
+      if (!encoderRestartTimer) {
+        encoderRestartTimer = setTimeout(startEncoder, 500);
+      }
+    });
+  }
+
+  function writePcm(chunk: Buffer): void {
+    startEncoder();
+    if (!encoder || encoder.stdin.destroyed || !encoder.stdin.writable || pcmBackpressured) return;
+    lastPcmWriteAt = Date.now();
+    if (!encoder.stdin.write(chunk)) {
+      pcmBackpressured = true;
+      current?.stdout.pause();
+    }
+  }
+
+  // Keep the encoder and every connected listener alive while a decoder starts,
+  // a file is skipped, or the next selected track is being opened.
+  const silenceTimer = setInterval(() => {
+    if (Date.now() - lastPcmWriteAt >= SILENCE_FRAME_MS * 2) {
+      writePcm(SILENCE_FRAME);
+    }
+  }, SILENCE_FRAME_MS);
+  silenceTimer.unref();
+  startEncoder();
 
   async function play(entry: StreamEntry): Promise<void> {
     currentKind = entry.kind;
     const startedAt = new Date();
     status = {
       ...status,
-      state: 'playing',
+      state: 'queued',
       currentKind: entry.kind,
       currentTitle: entry.title,
       currentArtist: entry.artist,
@@ -124,15 +214,31 @@ export function createLocalHttpPlaybackController(
       '-i',
       entry.filePath,
       '-vn',
+      '-c:a',
+      'pcm_s16le',
       '-ar',
-      '48000',
+      String(PCM_SAMPLE_RATE),
       '-ac',
-      '2',
-      ...settings.encoderArgs,
+      String(PCM_CHANNELS),
+      '-f',
+      's16le',
       'pipe:1',
-    ]);
+    ], { windowsHide: true });
 
-    current.stdout.on('data', (chunk: Buffer) => broadcast(chunk));
+    let started = false;
+    current.stdout.on('data', (chunk: Buffer) => {
+      if (!started) {
+        started = true;
+        status = {
+          ...status,
+          state: 'playing',
+          currentStartedAt: new Date().toISOString(),
+          lastError: null,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      writePcm(chunk);
+    });
     current.stderr.on('data', (chunk: Buffer) => {
       const line = chunk.toString('utf8').trim();
       if (line) {
@@ -141,7 +247,10 @@ export function createLocalHttpPlaybackController(
     });
 
     try {
-      await once(current, 'close');
+      const [code] = (await once(current, 'close')) as [number | null];
+      if (code !== 0 && code !== 255 && !current.killed) {
+        throw new Error(`local_stream_decoder_exit_${code ?? 'unknown'}`);
+      }
     } finally {
       current = null;
       currentKind = null;
@@ -180,7 +289,7 @@ export function createLocalHttpPlaybackController(
 
   const server = http.createServer((req, res) => {
     const requestPath = req.url?.split('?')[0] ?? '';
-    if (![streamPath, '/stream.mp3', '/stream.aac', '/stream'].includes(requestPath)) {
+    if (![streamPath, '/ai', '/stream.mp3', '/stream.aac', '/stream'].includes(requestPath)) {
       res.writeHead(404).end('not found');
       return;
     }
@@ -194,6 +303,10 @@ export function createLocalHttpPlaybackController(
       'icy-genre': 'Events',
       'icy-br': settings.bitrate,
     });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
     clients.add(res);
     req.on('close', () => clients.delete(res));
   });
