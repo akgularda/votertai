@@ -92,6 +92,7 @@ export function createLocalHttpPlaybackController(
   let encoderRestartTimer: NodeJS.Timeout | null = null;
   let pcmBackpressured = false;
   let lastDecoderPcmAt = 0;
+  let stopping = false;
   let status: PlaybackStatus = {
     state: 'idle',
     codec,
@@ -112,11 +113,17 @@ export function createLocalHttpPlaybackController(
         clients.delete(client);
         continue;
       }
-      client.write(chunk);
+      try {
+        client.write(chunk);
+      } catch {
+        client.destroy();
+        clients.delete(client);
+      }
     }
   }
 
   function startEncoder(): void {
+    if (stopping) return;
     if (encoder && encoder.exitCode === null && !encoder.killed) return;
     if (encoderRestartTimer) {
       clearTimeout(encoderRestartTimer);
@@ -146,6 +153,7 @@ export function createLocalHttpPlaybackController(
       pcmBackpressured = false;
       current?.stdout.resume();
     });
+    encoder.stdin.on('error', () => undefined);
     encoder.stderr.on('data', (chunk: Buffer) => {
       const line = chunk.toString('utf8').trim();
       if (line) console.error(`Local HTTP stream encoder: ${line}`);
@@ -161,13 +169,14 @@ export function createLocalHttpPlaybackController(
     encoder.on('close', () => {
       encoder = null;
       pcmBackpressured = false;
-      if (!encoderRestartTimer) {
+      if (!stopping && !encoderRestartTimer) {
         encoderRestartTimer = setTimeout(startEncoder, 500);
       }
     });
   }
 
   function writePcm(chunk: Buffer): void {
+    if (stopping) return;
     icecastPcmSink?.writePcm(chunk);
     startEncoder();
     if (!encoder || encoder.stdin.destroyed || !encoder.stdin.writable || pcmBackpressured) return;
@@ -182,6 +191,7 @@ export function createLocalHttpPlaybackController(
   // the station run faster than realtime. A decoder that stops producing PCM
   // is restarted instead, after which the no-decoder silence guard takes over.
   const silenceTimer = setInterval(() => {
+    if (stopping) return;
     if (!current) {
       writePcm(SILENCE_FRAME);
     } else if (Date.now() - lastDecoderPcmAt >= DECODER_STALL_MS) {
@@ -321,6 +331,15 @@ export function createLocalHttpPlaybackController(
     clients.add(res);
     req.on('close', () => clients.delete(res));
   });
+  server.on('clientError', (_error, socket) => socket.destroy());
+  server.on('error', (error) => {
+    status = {
+      ...status,
+      state: 'error',
+      lastError: `local_stream_server:${error.message}`,
+      updatedAt: new Date().toISOString(),
+    };
+  });
 
   server.listen(port, '0.0.0.0', () => {
     console.log(`Local HTTP ${codec.toUpperCase()} stream listening on ${streamUrl}`);
@@ -370,6 +389,25 @@ export function createLocalHttpPlaybackController(
     },
     status() {
       return { ...status, queuedEntries: queue.length };
+    },
+    stop() {
+      if (stopping) return;
+      stopping = true;
+      clearInterval(silenceTimer);
+      if (encoderRestartTimer) {
+        clearTimeout(encoderRestartTimer);
+        encoderRestartTimer = null;
+      }
+      for (const client of clients) client.destroy();
+      clients.clear();
+      server.close();
+      current?.kill();
+      current = null;
+      if (encoder && encoder.exitCode === null && !encoder.killed) {
+        encoder.stdin.end();
+        encoder.kill();
+      }
+      encoder = null;
     },
   };
 }

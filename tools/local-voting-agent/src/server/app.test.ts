@@ -30,6 +30,9 @@ describe('local voting API', () => {
       catalogTracks: 3,
       playbackState: 'disabled',
       backendConnection: 'disabled',
+      streamSourceConnection: 'disabled',
+      streamSourceAttempt: 0,
+      streamSourceLastError: null,
     });
     expect(JSON.stringify(response.body)).not.toContain('C:/Music');
   });
@@ -467,6 +470,28 @@ describe('local voting API', () => {
     expect(state.body.backendConnection).toBe('connected');
     expect(state.body.backendSyncError).toBeNull();
     expect(state.body.round.candidates[1].votes).toBe(5);
+  });
+
+  it('reports the dedicated Icecast source state without exposing credentials', async () => {
+    const app = createApp({
+      songs,
+      rng: () => 0,
+      streamSourceStatus: () => ({
+        state: 'connected',
+        attempt: 2,
+        lastError: null,
+        updatedAt: '2026-07-16T05:00:00.000Z',
+      }),
+    });
+
+    const response = await request(app).get('/api/health');
+
+    expect(response.body).toMatchObject({
+      streamSourceConnection: 'connected',
+      streamSourceAttempt: 2,
+      streamSourceLastError: null,
+    });
+    expect(JSON.stringify(response.body)).not.toContain('password');
   });
 
   it('adopts the authoritative backend round after a startup connection race', async () => {

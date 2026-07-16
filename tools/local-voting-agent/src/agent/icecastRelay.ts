@@ -12,6 +12,7 @@ export interface IcecastSinkStatus {
 export interface IcecastPcmSink {
   writePcm(chunk: Buffer): void;
   status(): IcecastSinkStatus;
+  stop(): void;
 }
 
 // This is intentionally the same continuous PCM -> AAC Icecast sink used by
@@ -68,8 +69,10 @@ export function startIcecastPcmSink(config: IcecastSourceConfig, ffmpegPath: str
   if (!config.enabled) return null;
 
   let child: ChildProcessWithoutNullStreams | null = null;
+  let retryTimer: NodeJS.Timeout | null = null;
   let backpressured = false;
   let failures = 0;
+  let stopped = false;
   let status: IcecastSinkStatus = {
     state: 'connecting',
     attempt: 1,
@@ -78,6 +81,8 @@ export function startIcecastPcmSink(config: IcecastSourceConfig, ffmpegPath: str
   };
 
   const run = () => {
+    if (stopped) return;
+    retryTimer = null;
     const startedAt = Date.now();
     status = {
       state: 'connecting',
@@ -114,7 +119,7 @@ export function startIcecastPcmSink(config: IcecastSourceConfig, ffmpegPath: str
         const target = new URL(config.url);
         console.log(`[ICECAST PCM SINK] connected to ${target.host}${target.pathname}`);
       }
-    }, 300);
+    }, 5_000);
 
     connectingChild.once('error', () => {
       status = {
@@ -128,6 +133,7 @@ export function startIcecastPcmSink(config: IcecastSourceConfig, ffmpegPath: str
       clearTimeout(connectedTimer);
       if (child === connectingChild) child = null;
       backpressured = false;
+      if (stopped) return;
       failures = Date.now() - startedAt >= 15_000 ? 1 : failures + 1;
       const retryMs = reconnectDelayMs(failures, 1_000, 30_000);
       status = {
@@ -136,9 +142,11 @@ export function startIcecastPcmSink(config: IcecastSourceConfig, ffmpegPath: str
         lastError: 'icecast_pcm_sink_disconnected',
         updatedAt: new Date().toISOString(),
       };
-      console.error(`[ICECAST PCM SINK] disconnected; retrying in ${Math.ceil(retryMs / 1000)}s`);
-      const timer = setTimeout(run, retryMs);
-      timer.unref();
+      if (failures === 1 || failures % 10 === 0) {
+        console.log(`[ICECAST PCM SINK] source unavailable; reconnecting in ${Math.ceil(retryMs / 1000)}s`);
+      }
+      retryTimer = setTimeout(run, retryMs);
+      retryTimer.unref();
     });
   };
 
@@ -154,5 +162,20 @@ export function startIcecastPcmSink(config: IcecastSourceConfig, ffmpegPath: str
       }
     },
     status: () => ({ ...status }),
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      const activeChild = child;
+      child = null;
+      backpressured = false;
+      if (activeChild && activeChild.exitCode === null && !activeChild.killed) {
+        activeChild.stdin.end();
+        activeChild.kill();
+      }
+    },
   };
 }

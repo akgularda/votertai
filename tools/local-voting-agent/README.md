@@ -86,6 +86,10 @@ Cover discovery checks:
 - `cover`, `folder`, `front`, or `album` images
 - embedded artwork or a video frame when the source contains one
 
+Embedded-art extraction is disabled by default so a malformed cover stream can
+never delay radio startup. Set `EXTRACT_EMBEDDED_ALBUM_ART=true` only when that
+extra boot-time work is explicitly desired; nearby image files are always used.
+
 Cover assets sent to the backend are limited to JPEG, PNG, or WebP and 1.5 MB. A RadioTEDU fallback image should be used when no real cover exists.
 
 ## Dedicated WebSocket Contract
@@ -115,7 +119,15 @@ Invoke-RestMethod http://127.0.0.1:4317/api/health
 Invoke-RestMethod http://127.0.0.1:4317/api/state
 ```
 
-`/api/health` reports catalog size, playback state, and backend connection state without exposing local paths or secrets.
+`/api/health` reports catalog size, playback state, backend connection state,
+and the dedicated Icecast source state without exposing local paths or secrets.
+
+The hardened supervisor also reads real audio bytes from the loopback `/ai`
+stream every cycle and from the public stream periodically. It replaces the
+agent only after three consecutive local failures, logs state transitions
+instead of repeating the same error, and keeps retrying indefinitely. An
+exclusive process lock prevents a duplicate launch from touching the Icecast
+mount before the control port is bound.
 
 ## Start or Recover a Production Voting Round
 

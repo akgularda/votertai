@@ -8,6 +8,8 @@ import type { CatalogSong, JingleTrack } from './types';
 const AUDIO_EXTENSIONS = new Set(['.aac', '.flac', '.m4a', '.mp3', '.ogg', '.wav', '.webm']);
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'];
 const GENERIC_ART_NAMES = ['cover', 'folder', 'front', 'album'];
+const METADATA_PROBE_TIMEOUT_MS = 1_000;
+const ART_EXTRACTION_TIMEOUT_MS = 3_000;
 
 function stableId(prefix: string, filePath: string): string {
   return `${prefix}-${createHash('sha1').update(path.resolve(filePath).toLowerCase()).digest('hex').slice(0, 12)}`;
@@ -106,7 +108,7 @@ function extractEmbeddedArt(filePath: string, songId: string, options: CatalogSc
 
   const result = spawnSync(options.ffmpegPath, buildAlbumArtExtractionArgs(filePath, outputPath), {
     windowsHide: true,
-    timeout: 15_000,
+    timeout: ART_EXTRACTION_TIMEOUT_MS,
     stdio: 'ignore',
   });
   return result.status === 0 && existsSync(outputPath) && statSync(outputPath).size > 0 ? outputPath : null;
@@ -120,7 +122,7 @@ function probeMetadata(filePath: string, ffprobePath?: string) {
   const result = spawnSync(ffprobePath, buildFfprobeMetadataArgs(filePath), {
     encoding: 'utf8',
     windowsHide: true,
-    timeout: 15_000,
+    timeout: METADATA_PROBE_TIMEOUT_MS,
   });
   return result.status === 0 ? parseFfprobeMetadata(result.stdout) : {};
 }

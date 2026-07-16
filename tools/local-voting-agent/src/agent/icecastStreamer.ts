@@ -5,6 +5,7 @@ import type { CatalogSong, IcecastSourceConfig, PlaybackPlan, PlaybackPlanEntry,
 export interface PlaybackController {
   enqueue(plan: PlaybackPlan): PlaybackStatus;
   status(): PlaybackStatus;
+  stop?(): void;
 }
 
 export type IcecastErrorCode = 'icecast_ffmpeg_failed' | 'icecast_stream_failed';

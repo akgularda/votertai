@@ -32,6 +32,12 @@ export interface CreateAppOptions {
   jingleBeforeWinner?: boolean;
   backendClient?: BackendVotingClient | null;
   playbackController?: PlaybackController | null;
+  streamSourceStatus?: (() => {
+    state: 'connecting' | 'connected' | 'retrying';
+    attempt: number;
+    lastError: string | null;
+    updatedAt: string;
+  }) | null;
   backendPollIntervalMs?: number;
   autoResolveAfterMs?: number;
   votingOpenBeforeEndMs?: number;
@@ -433,12 +439,16 @@ export function createApp(options: CreateAppOptions): express.Express {
 
   app.get('/api/health', (_req, res) => {
     const currentPlayback = options.playbackController?.status() ?? playbackStatus;
+    const streamSource = options.streamSourceStatus?.() ?? null;
     res.json({
       ok: true,
       service: 'radiotedu-local-voting-agent',
       catalogTracks: options.songs.length,
       playbackState: currentPlayback.state,
       backendConnection: options.backendClient?.connectionState?.() ?? (options.backendClient ? 'connected' : 'disabled'),
+      streamSourceConnection: streamSource?.state ?? 'disabled',
+      streamSourceAttempt: streamSource?.attempt ?? 0,
+      streamSourceLastError: streamSource?.lastError ?? null,
     });
   });
 

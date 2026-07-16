@@ -7,20 +7,33 @@ import { startCatalogRefresh } from '../agent/catalogRefresh';
 import { createIcecastPlaybackController } from '../agent/icecastStreamer';
 import { startIcecastPcmSink } from '../agent/icecastRelay';
 import { createLocalHttpPlaybackController } from '../agent/localHttpStreamer';
+import { acquireProcessLock } from '../agent/processLock';
 import { createWallRuntimePlaybackController } from '../agent/wallRuntimePlaybackController';
 import { scanFolderCatalog, scanJingleCatalog } from '../agent/folderCatalog';
 import { loadSongCatalog } from '../agent/songCatalog';
 import { createApp } from './app';
 
+const processLock = acquireProcessLock(path.resolve(process.cwd(), 'var', 'voting-agent.lock'));
+if (!processLock) {
+  console.log('RadioTEDU local voting agent is already running; duplicate start ignored');
+  process.exit(0);
+}
+const activeProcessLock = processLock;
+process.once('exit', () => activeProcessLock.release());
+console.log('[BOOT] process lock acquired');
+
 const config = loadAgentConfig();
+console.log('[BOOT] configuration loaded');
 const scanMusicLibrary = () => process.env.LOCAL_SONG_CATALOG
   ? loadSongCatalog(config.catalogPath, config.musicRoots)
   : scanFolderCatalog(config.musicRoots, {
       ffprobePath: config.ffprobePath,
-      ffmpegPath: config.ffmpegPath,
+      ffmpegPath: process.env.EXTRACT_EMBEDDED_ALBUM_ART === 'true' ? config.ffmpegPath : undefined,
       artCacheDir: config.artCacheDir,
     });
+console.log('[BOOT] scanning music catalog');
 const songs = scanMusicLibrary();
+console.log(`[BOOT] music catalog ready (${songs.length} tracks)`);
 startCatalogRefresh({
   songs,
   intervalMs: config.catalogRefreshMs,
@@ -33,15 +46,19 @@ startCatalogRefresh({
   },
 });
 const jingles = scanJingleCatalog(config.jingleRoots);
+console.log(`[BOOT] jingle catalog ready (${jingles.length} tracks)`);
 const backendClient = createBackendVotingClient(config.backend);
+console.log('[BOOT] backend client ready');
 const localHttpStreamEnabled = process.env.LOCAL_HTTP_STREAM_ENABLED === 'true';
 const icecastPcmSink = localHttpStreamEnabled ? startIcecastPcmSink(config.icecast, config.ffmpegPath) : null;
+console.log('[BOOT] Icecast sink initialized');
 const playbackController =
   localHttpStreamEnabled
     ? createLocalHttpPlaybackController(config.ffmpegPath, songs, undefined, icecastPcmSink)
     : process.env.WALL_RUNTIME_PLAYBACK_ENABLED === 'true'
     ? createWallRuntimePlaybackController()
     : createIcecastPlaybackController(config.icecast, config.ffmpegPath, songs);
+console.log('[BOOT] playback controller initialized');
 const app = createApp({
   songs,
   jingles,
@@ -50,6 +67,7 @@ const app = createApp({
   jingleBeforeWinner: config.jingleBeforeWinner,
   backendClient,
   playbackController,
+  streamSourceStatus: icecastPcmSink?.status,
   backendPollIntervalMs: config.backend.enabled ? 3000 : 0,
   autoResolveAfterMs: config.autoResolveAfterMs,
   votingOpenBeforeEndMs: config.votingOpenBeforeEndMs,
@@ -57,6 +75,7 @@ const app = createApp({
   automationTickMs: config.automationTickMs,
   recentTrackLimit: config.recentTrackLimit,
 });
+console.log('[BOOT] voting application initialized');
 
 const panelBuildDir = path.resolve(process.cwd(), 'dist');
 const panelIndexPath = path.join(panelBuildDir, 'index.html');
@@ -66,7 +85,35 @@ if (existsSync(panelIndexPath)) {
   app.get('*', (_req, res) => res.sendFile(panelIndexPath));
 }
 
-app.listen(config.serverPort, '127.0.0.1', () => {
+const server = app.listen(config.serverPort, '127.0.0.1', () => {
   console.log(`RadioTEDU local voting agent listening on http://127.0.0.1:${config.serverPort}`);
   console.log(`Voting library ready: ${songs.length} track(s), ${songs.filter((song) => song.albumArtPath).length} cover(s)`);
+});
+
+let shuttingDown = false;
+function shutdown(exitCode: number): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  playbackController?.stop?.();
+  icecastPcmSink?.stop();
+  server.close(() => {
+    activeProcessLock.release();
+    process.exit(exitCode);
+  });
+  setTimeout(() => process.exit(exitCode), 5_000).unref();
+}
+
+server.once('error', () => {
+  console.error('[FATAL] local agent listener failed; supervisor will restart it');
+  shutdown(1);
+});
+process.once('SIGINT', () => shutdown(0));
+process.once('SIGTERM', () => shutdown(0));
+process.once('uncaughtException', () => {
+  console.error('[FATAL] uncaught agent exception; supervisor will restart it');
+  shutdown(1);
+});
+process.once('unhandledRejection', () => {
+  console.error('[FATAL] unhandled agent rejection; supervisor will restart it');
+  shutdown(1);
 });
