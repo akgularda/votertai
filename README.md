@@ -83,7 +83,9 @@ votertai/
 │   ├── src/web/                     Local diagnostic dashboard
 │   ├── scripts/
 │   │   ├── voting-supervisor.mjs    Health watchdog and process recovery
+│   │   ├── install-voting-service.ps1
 │   │   ├── install-voting-startup.ps1
+│   │   ├── voting_windows_service.py
 │   │   └── start-production-voting-round.ps1
 │   ├── WEB_SERVER_AI_STREAM_HANDOFF.md
 │   ├── .env.example                 Voting PC configuration template
@@ -189,15 +191,21 @@ RADIO_AGENT_ID=school-radio-pc
 RADIO_AGENT_REQUEST_SECRET=<dedicated-agent-secret>
 ```
 
-Install the supported per-user automatic startup launcher:
+For production, install the automatic Windows service from an elevated
+PowerShell window:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-voting-startup.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\install-voting-service.ps1
 ```
 
-The launcher starts the Node supervisor after Windows sign-in. The supervisor
-checks the local API and actual local audio bytes, tolerates transient failures,
-and replaces the managed agent only after repeated health failures.
+The service starts during Windows boot as `LocalSystem`, before user sign-in.
+It restores the Node supervisor when missing, verifies both the local API and
+real audio bytes, and relies on the agent's indefinite WSS and Icecast retry
+loops. Windows Service Recovery restarts the service after unexpected failures.
+The process locks make an accidental manual or sign-in launch harmless.
+
+When administrator access is unavailable, use
+`install-voting-startup.ps1` as a sign-in-only fallback.
 
 ## Voting and playback lifecycle
 

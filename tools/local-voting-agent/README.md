@@ -104,7 +104,23 @@ The signature is base64url HMAC-SHA256 of `<agent-id>:<unix-seconds>`. Supported
 
 ## Windows Startup
 
-Install the per-user Startup launcher and crash supervisor:
+For production, install the dedicated automatic Windows service from an
+**elevated PowerShell** window:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-voting-service.ps1
+```
+
+The service starts as Windows boots, before user sign-in. It supervises the
+existing Node watchdog rather than replacing it, checks both the loopback API
+and real audio bytes, and uses Windows Service Recovery to restart after
+unexpected service failures. The Node watchdog continues to reconnect the
+backend WSS and `/ai` source indefinitely with bounded backoff. Process locks
+make the service, watchdog, and any accidental manual launch safe against
+duplicate ownership.
+
+If administrator access is temporarily unavailable, install the per-user
+sign-in fallback:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-voting-startup.ps1
