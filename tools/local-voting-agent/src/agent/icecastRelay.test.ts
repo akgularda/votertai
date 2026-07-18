@@ -26,4 +26,19 @@ describe('BroadcastAI-compatible Icecast PCM sink', () => {
     expect(args).toContain('-legacy_icecast');
     expect(args.at(-1)).toBe('icecast://source:p%40ss%20word@icecast.example.test:11154/ai');
   });
+
+  it('supports the proven /ai MP3 source contract without legacy SOURCE mode', () => {
+    const args = buildIcecastPcmSinkArgs({
+      ...config,
+      codec: 'mp3',
+      legacySource: false,
+      sourceTransport: 'http',
+    });
+
+    expect(args).toContain('libmp3lame');
+    expect(args).toContain('audio/mpeg');
+    expect(args).toContain('mp3');
+    expect(args).not.toContain('-legacy_icecast');
+    expect(args.at(-1)).toBe('http://source:p%40ss%20word@icecast.example.test:11154/ai');
+  });
 });

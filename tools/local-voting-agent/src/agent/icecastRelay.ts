@@ -15,9 +15,28 @@ export interface IcecastPcmSink {
   stop(): void;
 }
 
-// This is intentionally the same continuous PCM -> AAC Icecast sink used by
-// RadioTEDU BroadcastAI. The only station-specific difference is mount /ai.
+// Continuous PCM Icecast sink. The /ai origin historically uses MP3 with
+// modern PUT source mode, while BroadcastAI /radio uses AAC legacy mode.
 export function buildIcecastPcmSinkArgs(config: IcecastSourceConfig): string[] {
+  const codecArgs =
+    config.codec === 'mp3'
+      ? ['-c:a', 'libmp3lame', '-b:a', `${config.bitrateKbps}k`, '-ar', '48000', '-ac', '2', '-content_type', 'audio/mpeg', '-f', 'mp3']
+      : [
+          '-c:a',
+          'aac',
+          '-b:a',
+          `${config.bitrateKbps}k`,
+          '-profile:a',
+          'aac_low',
+          '-ar',
+          '48000',
+          '-ac',
+          '2',
+          '-content_type',
+          'audio/aac',
+          '-f',
+          'adts',
+        ];
   const args = [
     '-hide_banner',
     '-loglevel',
@@ -31,20 +50,7 @@ export function buildIcecastPcmSinkArgs(config: IcecastSourceConfig): string[] {
     '-i',
     'pipe:0',
     '-vn',
-    '-c:a',
-    'aac',
-    '-b:a',
-    `${config.bitrateKbps}k`,
-    '-profile:a',
-    'aac_low',
-    '-ar',
-    '48000',
-    '-ac',
-    '2',
-    '-content_type',
-    'audio/aac',
-    '-f',
-    'adts',
+    ...codecArgs,
   ];
   if (usesLegacyIcecastSource(config)) {
     args.push('-legacy_icecast', '1');

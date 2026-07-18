@@ -57,20 +57,50 @@ export function buildAuthenticatedIcecastOutputUrl(config: IcecastSourceConfig):
   const publicUrl = new URL(config.url);
   publicUrl.username = config.username;
   publicUrl.password = config.password;
+  if (config.sourceTransport === 'http') {
+    return publicUrl.toString();
+  }
   const port = Number(publicUrl.port || (publicUrl.protocol === 'https:' ? 443 : 80));
-  const protocol = port === 443 ? 'https' : port === 80 ? 'http' : publicUrl.protocol === 'https:' ? 'icecasts' : 'icecast';
+  const protocol =
+    config.sourceTransport === 'icecast'
+      ? publicUrl.protocol === 'https:'
+        ? 'icecasts'
+        : 'icecast'
+      : port === 443
+        ? 'https'
+        : port === 80
+          ? 'http'
+          : publicUrl.protocol === 'https:'
+            ? 'icecasts'
+            : 'icecast';
   const defaultPort = (protocol === 'https' && port === 443) || (protocol === 'http' && port === 80);
   const host = defaultPort ? publicUrl.hostname : publicUrl.host;
   return `${protocol}://${publicUrl.username}:${publicUrl.password}@${host}${publicUrl.pathname}${publicUrl.search}`;
 }
 
 export function usesLegacyIcecastSource(config: IcecastSourceConfig): boolean {
+  if (typeof config.legacySource === 'boolean') return config.legacySource;
   const publicUrl = new URL(config.url);
   const port = Number(publicUrl.port || (publicUrl.protocol === 'https:' ? 443 : 80));
   return port !== 80 && port !== 443;
 }
 
 function buildIcecastArgs(entry: PlaybackPlanEntry, config: IcecastSourceConfig): string[] {
+  const codecArgs =
+    config.codec === 'mp3'
+      ? ['-codec:a', 'libmp3lame', '-b:a', `${config.bitrateKbps}k`, '-content_type', 'audio/mpeg', '-f', 'mp3']
+      : [
+          '-codec:a',
+          'aac',
+          '-b:a',
+          `${config.bitrateKbps}k`,
+          '-profile:a',
+          'aac_low',
+          '-content_type',
+          'audio/aac',
+          '-f',
+          'adts',
+        ];
   const args = [
     '-hide_banner',
     '-nostdin',
@@ -84,12 +114,7 @@ function buildIcecastArgs(entry: PlaybackPlanEntry, config: IcecastSourceConfig)
     '48000',
     '-ac',
     '2',
-    '-codec:a',
-    'aac',
-    '-b:a',
-    `${config.bitrateKbps}k`,
-    '-profile:a',
-    'aac_low',
+    ...codecArgs,
     '-user_agent',
     'RadioTEDU Broadcast Wall',
     '-ice_name',
@@ -102,10 +127,6 @@ function buildIcecastArgs(entry: PlaybackPlanEntry, config: IcecastSourceConfig)
     'https://radiotedu.com',
     '-ice_public',
     '1',
-    '-content_type',
-    'audio/aac',
-    '-f',
-    'adts',
   ];
   if (usesLegacyIcecastSource(config)) {
     args.push('-legacy_icecast', '1');

@@ -38,6 +38,15 @@ function normalizeBitrate(value: string | undefined): number {
   return Number.isInteger(parsed) && parsed >= 64 && parsed <= 320 ? parsed : 192;
 }
 
+function normalizeIcecastCodec(value: string | undefined): 'aac' | 'mp3' {
+  return value?.trim().toLowerCase() === 'mp3' ? 'mp3' : 'aac';
+}
+
+function normalizeIcecastTransport(value: string | undefined): 'auto' | 'http' | 'icecast' {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === 'http' || normalized === 'icecast' ? normalized : 'auto';
+}
+
 function normalizeNonNegativeSeconds(value: string | undefined): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed * 1000) : 0;
@@ -110,6 +119,11 @@ export function loadAgentConfig(env: NodeJS.ProcessEnv = process.env): AgentConf
       username: icecastUsername,
       password: icecastPassword,
       bitrateKbps: normalizeBitrate(env.ICECAST_BITRATE_KBPS),
+      codec: normalizeIcecastCodec(env.ICECAST_CODEC),
+      sourceTransport: normalizeIcecastTransport(env.ICECAST_SOURCE_TRANSPORT),
+      ...(env.ICECAST_LEGACY_SOURCE === undefined
+        ? {}
+        : { legacySource: normalizeBoolean(env.ICECAST_LEGACY_SOURCE) }),
       name: env.ICECAST_STREAM_NAME?.trim() || 'RadioTEDU Spark',
       genre: env.ICECAST_STREAM_GENRE?.trim() || 'RadioTEDU',
       description: env.ICECAST_STREAM_DESCRIPTION?.trim() || 'RadioTEDU next-song voting stream',

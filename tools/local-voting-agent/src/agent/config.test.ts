@@ -76,6 +76,9 @@ describe('agent config', () => {
       ICECAST_SOURCE_USERNAME: 'source',
       ICECAST_SOURCE_PASSWORD: 'source-password',
       ICECAST_BITRATE_KBPS: '160',
+      ICECAST_CODEC: 'mp3',
+      ICECAST_LEGACY_SOURCE: 'false',
+      ICECAST_SOURCE_TRANSPORT: 'http',
     });
 
     expect(config.icecast).toMatchObject({
@@ -84,6 +87,9 @@ describe('agent config', () => {
       username: 'source',
       password: 'source-password',
       bitrateKbps: 160,
+      codec: 'mp3',
+      legacySource: false,
+      sourceTransport: 'http',
     });
   });
 });

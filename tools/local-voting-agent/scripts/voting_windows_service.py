@@ -233,6 +233,20 @@ def launch_supervisor() -> subprocess.Popen:
 def stop_owned_process(process: subprocess.Popen | None) -> None:
     if process is None or process.poll() is not None:
         return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=False,
+            )
+            process.wait(timeout=10)
+            return
+        except Exception:
+            pass
     try:
         process.terminate()
         process.wait(timeout=15)

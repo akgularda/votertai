@@ -41,6 +41,9 @@ export interface IcecastSourceConfig {
   username: string;
   password: string;
   bitrateKbps: number;
+  codec?: 'aac' | 'mp3';
+  legacySource?: boolean;
+  sourceTransport?: 'auto' | 'http' | 'icecast';
   name: string;
   genre: string;
   description: string;
