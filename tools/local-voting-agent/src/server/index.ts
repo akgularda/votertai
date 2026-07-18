@@ -3,7 +3,7 @@ import path from 'node:path';
 import express from 'express';
 import { loadAgentConfig } from '../agent/config';
 import { createBackendVotingClient } from '../agent/backendClient';
-import { startCatalogRefresh } from '../agent/catalogRefresh';
+import { refreshCatalogInPlace, startCatalogRefresh } from '../agent/catalogRefresh';
 import { createIcecastPlaybackController } from '../agent/icecastStreamer';
 import { startIcecastPcmSink } from '../agent/icecastRelay';
 import { createLocalHttpPlaybackController } from '../agent/localHttpStreamer';
@@ -11,6 +11,7 @@ import { acquireProcessLock } from '../agent/processLock';
 import { createWallRuntimePlaybackController } from '../agent/wallRuntimePlaybackController';
 import { scanFolderCatalog, scanJingleCatalog } from '../agent/folderCatalog';
 import { loadSongCatalog } from '../agent/songCatalog';
+import { synchronizeYoutubeCoverArt } from '../agent/youtubeCoverSync';
 import { createApp } from './app';
 
 const processLock = acquireProcessLock(path.resolve(process.cwd(), 'var', 'voting-agent.lock'));
@@ -34,7 +35,7 @@ const scanMusicLibrary = () => process.env.LOCAL_SONG_CATALOG
 console.log('[BOOT] scanning music catalog');
 const songs = scanMusicLibrary();
 console.log(`[BOOT] music catalog ready (${songs.length} tracks)`);
-startCatalogRefresh({
+const stopCatalogRefresh = startCatalogRefresh({
   songs,
   intervalMs: config.catalogRefreshMs,
   scan: scanMusicLibrary,
@@ -90,10 +91,48 @@ const server = app.listen(config.serverPort, '127.0.0.1', () => {
   console.log(`Voting library ready: ${songs.length} track(s), ${songs.filter((song) => song.albumArtPath).length} cover(s)`);
 });
 
+let coverSyncRunning = false;
+const coverSyncEnabled = !process.env.LOCAL_SONG_CATALOG && process.env.YOUTUBE_COVER_SYNC_ENABLED !== 'false';
+const configuredCoverSyncMinutes = Number(process.env.YOUTUBE_COVER_SYNC_MINUTES);
+const coverSyncIntervalMs =
+  (Number.isFinite(configuredCoverSyncMinutes) && configuredCoverSyncMinutes > 0
+    ? Math.max(1, configuredCoverSyncMinutes)
+    : 15) * 60_000;
+async function synchronizeCovers(): Promise<void> {
+  if (!coverSyncEnabled || coverSyncRunning) return;
+  coverSyncRunning = true;
+  try {
+    const result = await synchronizeYoutubeCoverArt({
+      songs,
+      musicRoots: config.musicRoots,
+      artCacheDir: config.artCacheDir,
+    });
+    if (result.downloaded > 0) {
+      refreshCatalogInPlace(songs, scanMusicLibrary());
+      console.log(
+        `[COVERS] downloaded ${result.downloaded} cover(s); catalog now has ${songs.filter((song) => song.albumArtPath).length}`,
+      );
+    } else if (result.failed > 0) {
+      console.error(`[COVERS] ${result.failed} cover request(s) failed; automatic retry remains active`);
+    }
+  } catch {
+    console.error('[COVERS] synchronization failed; voting continues and the next retry remains scheduled');
+  } finally {
+    coverSyncRunning = false;
+  }
+}
+const coverSyncTimer = coverSyncEnabled
+  ? setInterval(() => void synchronizeCovers(), coverSyncIntervalMs)
+  : null;
+coverSyncTimer?.unref();
+if (coverSyncEnabled) setTimeout(() => void synchronizeCovers(), 1_000).unref();
+
 let shuttingDown = false;
 function shutdown(exitCode: number): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  stopCatalogRefresh();
+  if (coverSyncTimer) clearInterval(coverSyncTimer);
   playbackController?.stop?.();
   icecastPcmSink?.stop();
   server.close(() => {

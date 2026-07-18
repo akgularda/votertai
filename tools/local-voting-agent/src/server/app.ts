@@ -227,6 +227,7 @@ export function createApp(options: CreateAppOptions): express.Express {
   let roundSourceKey: string | null = null;
   let automationBusy = false;
   let lastBackendRecoveryAttemptAt = 0;
+  let lastArtworkPublishAttemptAt = 0;
   const recentSongIds: string[] = [];
   const enqueuedRoundIds = new Set<string>();
 
@@ -300,6 +301,31 @@ export function createApp(options: CreateAppOptions): express.Express {
       if (!candidateSetsMatch(currentRound.candidates, activeRound.candidates)) {
         backendSyncError = 'backend_candidate_mismatch_during_vote_sync';
         return;
+      }
+
+      const localSongs = new Map(options.songs.map((song) => [song.id, song]));
+      currentRound = {
+        ...currentRound,
+        candidates: currentRound.candidates.map((candidate) => {
+          const localSong = localSongs.get(candidate.songId);
+          return localSong?.albumArtPath && localSong.albumArtPath !== candidate.albumArtPath
+            ? {
+                ...candidate,
+                albumArtPath: localSong.albumArtPath,
+                albumArtUrl: `/album-art/${encodeURIComponent(localSong.id)}`,
+              }
+            : candidate;
+        }),
+      };
+      const remoteById = new Map(activeRound.candidates.map((candidate) => [candidate.id, candidate]));
+      const backendNeedsArtwork = currentRound.candidates.some((candidate) => {
+        const remoteUrl = remoteById.get(candidate.id)?.albumArtUrl ?? '';
+        return Boolean(candidate.albumArtPath) && (!remoteUrl || remoteUrl.endsWith('/fallback.png'));
+      });
+      if (backendNeedsArtwork && Date.now() - lastArtworkPublishAttemptAt >= 30_000) {
+        lastArtworkPublishAttemptAt = Date.now();
+        await options.backendClient.publishRound(currentRound);
+        console.log(`Backend accepted cover-art refresh for voting round ${currentRound.id}`);
       }
 
       const voteCounts = new Map(activeRound.candidates.map((candidate) => [candidate.id, candidate.votes]));

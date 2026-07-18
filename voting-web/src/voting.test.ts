@@ -22,6 +22,7 @@ describe('voting web contract', () => {
     const status = normalizeStatus({data: {agent: {agentId: 'school-radio-pc', connected: true}, streamUrl: 'https://stream.radiotedu.com/ai'}}, 'fallback');
     expect(status?.agent.connected).toBe(true);
     expect(candidateArtUrl({id: 'c', songId: 's', title: '', artist: '', albumArtUrl: '/jukebox/uploads/a.webp', votes: 0}, 'https://radiotedu.com')).toBe('https://radiotedu.com/jukebox/uploads/a.webp');
+    expect(candidateArtUrl({id: 'c', songId: 's', title: '', artist: '', albumArtUrl: '/uploads/a.webp', votes: 0}, 'https://radiotedu.com')).toBe('https://radiotedu.com/jukebox/uploads/a.webp');
   });
 
   it('renders round:null as a waiting state', () => {

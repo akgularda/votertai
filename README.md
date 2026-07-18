@@ -173,6 +173,8 @@ At minimum, configure these values in the local `.env`:
 
 ```dotenv
 MUSIC_LIBRARY_DIR=C:\Path\To\Music
+YOUTUBE_COVER_SYNC_ENABLED=true
+YOUTUBE_COVER_SYNC_MINUTES=15
 VOTING_AGENT_PLAYBACK_MODE=live
 
 LOCAL_HTTP_STREAM_ENABLED=true

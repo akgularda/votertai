@@ -56,6 +56,8 @@ The local dashboard and API listen only on `http://127.0.0.1:4317`.
 ```dotenv
 MUSIC_LIBRARY_DIR=C:\Users\tedu\Downloads\song
 MUSIC_LIBRARY_REFRESH_SECONDS=60
+YOUTUBE_COVER_SYNC_ENABLED=true
+YOUTUBE_COVER_SYNC_MINUTES=15
 CANDIDATE_COUNT=3
 VOTING_OPEN_BEFORE_END_SECONDS=86400
 VOTING_LOCK_BEFORE_END_SECONDS=10
@@ -92,6 +94,12 @@ Cover discovery checks:
 Embedded-art extraction is disabled by default so a malformed cover stream can
 never delay radio startup. Set `EXTRACT_EMBEDDED_ALBUM_ART=true` only when that
 extra boot-time work is explicitly desired; nearby image files are always used.
+
+When a music root contains a yt-dlp `downloaded.txt` archive, cover sync is
+enabled by default. The agent resolves archived YouTube titles, downloads
+missing thumbnails as sidecar JPEG files, refreshes the catalog, and republishes
+missing artwork for an active backend round. A failed request never stops voting
+or playback and is retried at the configured interval.
 
 Cover assets sent to the backend are limited to JPEG, PNG, or WebP and 1.5 MB. A RadioTEDU fallback image should be used when no real cover exists.
 

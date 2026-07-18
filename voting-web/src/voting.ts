@@ -128,6 +128,9 @@ export function normalizeStatus(payload: unknown, fallbackStreamUrl: string): Vo
 export function candidateArtUrl(candidate: Candidate, origin: string): string | null {
   if (!candidate.albumArtUrl) return null;
   if (/^https:\/\//i.test(candidate.albumArtUrl)) return candidate.albumArtUrl;
+  if (candidate.albumArtUrl.startsWith('/uploads/') && /^https:\/\/(?:www\.)?radiotedu\.com$/i.test(origin)) {
+    return `${origin}/jukebox${candidate.albumArtUrl}`;
+  }
   if (candidate.albumArtUrl.startsWith('/')) return `${origin}${candidate.albumArtUrl}`;
   return null;
 }
